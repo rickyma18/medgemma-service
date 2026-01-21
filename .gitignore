@@ -48,3 +48,9 @@ Thumbs.db
 # Scripts
 scripts/set-env.ps1
 scripts/set-env-lmstudio.ps1
+
+# Secrets
+secrets/
+secrets/*.json
+.env
+.env.*
