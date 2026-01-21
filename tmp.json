@@ -1,0 +1,12 @@
+﻿{
+  "transcript": {
+    "segments": [
+      { "speaker": "patient", "text": "Me duele la cabeza", "startMs": 0, "endMs": 1000 }
+    ],
+    "language": "es",
+    "durationMs": 1000
+  },
+  "config": {
+    "modelVersion": "medgemma-4b-it"
+  }
+}

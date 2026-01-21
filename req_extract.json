@@ -1,0 +1,23 @@
+{
+    "transcript": {
+        "segments": [
+            {
+                "speaker": "patient",
+                "text": "Paciente masculino de 45 años con dolor torácico de 2 horas de evolución, irradiado a brazo izquierdo, acompañado de náusea y diaforesis. Niega fiebre.",
+                "startMs": 0,
+                "endMs": 15000
+            }
+        ],
+        "language": "es",
+        "durationMs": 15000
+    },
+    "context": {
+        "specialty": "Urgencias",
+        "encounterType": "Consulta",
+        "patientAge": 45,
+        "patientGender": "male"
+    },
+    "config": {
+        "modelVersion": "medgemma-4b-it"
+    }
+}

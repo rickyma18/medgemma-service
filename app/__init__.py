@@ -1,0 +1,1 @@
+# MedGemma Service - FastAPI Application

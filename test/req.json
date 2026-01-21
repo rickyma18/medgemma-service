@@ -1,0 +1,26 @@
+{
+  "transcript": {
+    "segments": [
+      {
+        "speaker": "patient",
+        "text": "Me duele la cabeza desde hace tres dias.",
+        "startMs": 0,
+        "endMs": 3000
+      },
+      {
+        "speaker": "doctor",
+        "text": "Ha tomado algun medicamento?",
+        "startMs": 3500,
+        "endMs": 5000
+      }
+    ],
+    "language": "es",
+    "durationMs": 5000
+  },
+  "context": {
+    "specialty": "medicina_general",
+    "encounterType": "consulta",
+    "patientAge": 35,
+    "patientGender": "male"
+  }
+}
