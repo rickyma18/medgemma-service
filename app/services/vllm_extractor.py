@@ -37,15 +37,9 @@ def _build_system_prompt() -> str:
     - NO invented diagnoses or treatments
     - null/[] for missing data
     """
-    return """You are a clinical documentation assistant. Extract clinical facts from the transcript.
+    return """You are an expert clinical documentation specialist. Extract clinical facts from a medical consultation transcript using a concise, pro-doctor style.
 
-OUTPUT RULES:
-1. Return ONLY valid JSON matching the exact schema below
-2. Do NOT invent diagnoses, treatments, or symptoms not explicitly mentioned
-3. If data is not present, use null for optional fields and [] for lists
-4. Use Spanish when the transcript is in Spanish
-
-JSON SCHEMA:
+OUTPUT FORMAT - Return ONLY valid JSON:
 {
   "chiefComplaint": {"text": string | null},
   "hpi": {"narrative": string | null},
@@ -66,12 +60,38 @@ JSON SCHEMA:
 }
 
 EXTRACTION RULES:
-- chiefComplaint: Patient's main reason for visit, in their words
-- hpi: Narrative of present illness with onset, duration, severity
-- ros: Only include symptoms explicitly mentioned (positive or negative)
-- physicalExam: Only findings explicitly stated by the doctor
-- assessment: ONLY diagnoses explicitly stated; do NOT infer
-- plan: ONLY orders/treatments explicitly mentioned"""
+
+1. chiefComplaint.text: Brief (3-10 words), not a long patient quote.
+
+2. hpi.narrative: 1-3 sentences with onset, duration, severity. Only facts present.
+
+3. ros: ONLY symptoms explicitly confirmed/denied by patient. No allergies/meds/history.
+
+4. physicalExam: CRITICAL - ONLY findings from DOCTOR'S physical examination.
+   - Valid: "a la exploración", "a la otoscopia", "se observa", "orofaringe", "amígdalas", "adenopatías", "temperatura", "TA", "FC"
+   - Patient perception ("siento", "refiere", "me duele", "oído tapado") → hpi/ros, NOT physicalExam
+   - No exam evidence → findings: [], vitals: []
+
+5. assessment: MANDATORY - ALWAYS populate assessment.primary
+   A) Explicit diagnosis stated → use it, icd10 may be null
+   B) NO explicit diagnosis → use SYNDROMIC LABEL below, icd10=null, differential=[]
+
+   SYNDROMIC MAPPING (use ONE label, never concatenate with "y"):
+   | Symptom | Label |
+   |---------|-------|
+   | dolor/ardor garganta, odinofagia | "Odinofagia a estudio" |
+   | vértigo rotatorio, mareo al girar | "Vértigo posicional a estudio" |
+   | congestión + rinorrea + dolor facial | "Síndrome rinosinusal a estudio" |
+   | otalgia, oído tapado | "Otalgia a estudio" |
+   | disfonía, ronquera | "Disfonía a estudio" |
+   | tinnitus | "Tinnitus a estudio" |
+   | Other → "<main symptom> a estudio" (max 6 words) |
+
+6. plan: ONLY tests/treatments explicitly ordered.
+
+FORBIDDEN: placeholders ("registrado", "no especificado"), concatenated symptoms in assessment, patient perceptions in physicalExam.
+
+Respond in Spanish if transcript is Spanish. ONLY JSON, no markdown."""
 
 
 def _build_user_prompt(transcript: Transcript, context: Optional[Context]) -> str:

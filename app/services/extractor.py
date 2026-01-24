@@ -26,6 +26,111 @@ logger = get_safe_logger(__name__)
 # Mock model version identifier
 MOCK_MODEL_VERSION = "mock-0"
 
+# Placeholder values to filter from vitals
+_PLACEHOLDER_VALUES = frozenset({
+    "no especificado",
+    "sin información",
+    "sin informacion",
+    "pendiente",
+    "n/a",
+    "na",
+    "none",
+    "null",
+})
+
+
+# Non-findings to remove from physicalExam.findings
+_NON_FINDINGS = frozenset({
+    "a la exploración",
+    "a la exploracion",
+})
+
+# ROS term normalization (english -> spanish)
+_ROS_NORMALIZE = {
+    "fever": "fiebre",
+}
+
+def _sanitize_facts(facts: ClinicalFacts, transcript: Transcript) -> ClinicalFacts:
+    sanitized_count = 0
+
+    # 1) Sanitize vitals
+    if facts.physical_exam and facts.physical_exam.vitals:
+        original = len(facts.physical_exam.vitals)
+        cleaned = []
+        for v in facts.physical_exam.vitals:
+            val = (getattr(v, "value", None) or "").strip().lower()
+            if not val:
+                continue
+            if val in _PLACEHOLDER_VALUES:
+                continue
+            cleaned.append(v)
+        facts.physical_exam.vitals = cleaned
+        sanitized_count += original - len(cleaned)
+
+    # 2) Sanitize findings
+    if facts.physical_exam and facts.physical_exam.findings:
+        original = len(facts.physical_exam.findings)
+        cleaned = []
+        for f in facts.physical_exam.findings:
+            txt = (f or "").strip().lower()
+            if not txt:
+                continue
+            if txt in _NON_FINDINGS:
+                continue
+            cleaned.append(f)
+        facts.physical_exam.findings = cleaned
+        sanitized_count += original - len(cleaned)
+
+    # 3) Normalize ROS
+    if facts.ros:
+        if facts.ros.positives:
+            facts.ros.positives = [
+                _ROS_NORMALIZE.get((p or "").strip().lower(), p)
+                for p in facts.ros.positives
+                if (p or "").strip()
+            ]
+        if facts.ros.negatives:
+            facts.ros.negatives = [
+                _ROS_NORMALIZE.get((n or "").strip().lower(), n)
+                for n in facts.ros.negatives
+                if (n or "").strip()
+            ]
+
+    if sanitized_count > 0:
+        logger.debug("sanitize_facts applied", items_removed=sanitized_count)
+    # 4) If no DOCTOR exam cues in transcript -> clear physicalExam
+    has_exam_cues = any(
+        cue in (seg.text or "").lower()
+        for seg in transcript.segments
+        if seg.speaker == "doctor"
+        for cue in [
+            "a la exploración",
+            "a la exploracion",
+            "a la otoscopia",
+            "otoscopia",
+            "se observa",
+            "orofaringe",
+            "amígd",
+            "amigd",
+            "adenopat",
+            "auscult",
+            "ta ",
+            "fc ",
+            "temperatura",
+        ]
+    )
+
+    if not has_exam_cues:
+        # Patient-reported stuff must not be in physicalExam if doctor didn't examine in transcript
+        if facts.physical_exam:
+            if facts.physical_exam.findings:
+                sanitized_count += len(facts.physical_exam.findings)
+            if facts.physical_exam.vitals:
+                sanitized_count += len(facts.physical_exam.vitals)
+            facts.physical_exam.findings = []
+            facts.physical_exam.vitals = []
+
+    return facts
 
 def mock_extract(
     transcript: Transcript,
@@ -115,11 +220,14 @@ async def extract(
     if settings.extractor_backend == "vllm":
         from app.services.vllm_extractor import vllm_extract, get_vllm_model_version
         facts, ms = await vllm_extract(transcript, context)
+        facts = _sanitize_facts(facts, transcript)
         return facts, ms, get_vllm_model_version()
-    
+
     elif settings.extractor_backend == "openai_compat":
         from app.services.openai_compat_extractor import openai_compat_extract
-        return await openai_compat_extract(transcript, context, config)
+        facts, ms, model_version = await openai_compat_extract(transcript, context, config)
+        facts = _sanitize_facts(facts, transcript)
+        return facts, ms, model_version
     else:
         # Default to mock
         facts, ms = mock_extract(transcript, context)

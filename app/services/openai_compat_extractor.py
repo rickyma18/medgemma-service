@@ -35,38 +35,10 @@ def _build_system_prompt() -> str:
     - NO placeholder text (e.g., "registrado", "no especificado")
     - null/[] for truly missing data
     """
-    return """You are an expert clinical documentation specialist. Your task is to extract clinical facts from a medical consultation transcript.
-
-## CRITICAL ANTI-PLACEHOLDER RULE
-NEVER use generic placeholder phrases like:
-- "Motivo de consulta registrado"
-- "Historia clínica registrada"
-- "No especificado"
-- "Sin información"
-- "Pendiente"
-- "Registrado"
-
-If the transcript contains clinical information, you MUST extract the ACTUAL content.
-If a field is truly NOT mentioned in the transcript, use null (for optional fields) or [] (for lists).
-
-## EXTRACTION EXAMPLES
-
-Example 1 - Patient statement:
-Transcript: "[Paciente]: Me arde la garganta desde hace 4 días"
-Extract:
-- chiefComplaint.text: "Ardor de garganta desde hace 4 días"
-- hpi.narrative: "Paciente refiere ardor de garganta con 4 días de evolución."
-
-Example 2 - Negative symptom:
-Transcript: "[Paciente]: No me falta el aire"
-Extract:
-- ros.negatives: ["disnea"]
-
-Example 3 - Missing data:
-If blood pressure is NOT mentioned anywhere → vitals: [] (empty array, NOT a placeholder)
+    return """You are an expert clinical documentation specialist. Extract clinical facts from a medical consultation transcript using a concise, pro-doctor style.
 
 ## OUTPUT FORMAT
-Return ONLY one JSON object conforming EXACTLY to this schema:
+Return ONLY valid JSON matching this schema:
 {
   "chiefComplaint": {"text": string | null},
   "hpi": {"narrative": string | null},
@@ -87,19 +59,51 @@ Return ONLY one JSON object conforming EXACTLY to this schema:
 }
 
 ## EXTRACTION RULES
-1. chiefComplaint: Extract the patient's main reason for visit in their own words or paraphrased
-2. hpi: Build a narrative with onset, duration, severity, and relevant details mentioned
-3. ros: Include ONLY symptoms explicitly confirmed (positives) or denied (negatives) by the patient
-4. physicalExam: Include ONLY findings explicitly stated by the doctor during examination
-5. assessment: Include ONLY diagnoses explicitly stated by the doctor; do NOT infer diagnoses
-6. plan: Include ONLY diagnostic tests, treatments, and follow-up explicitly ordered
+
+1. chiefComplaint.text: Brief (3-10 words), not a long patient quote.
+   Example: "Dolor de garganta de 4 días"
+
+2. hpi.narrative: 1-3 sentences with onset, duration, severity. Only facts present in transcript.
+
+3. ros: ONLY symptoms explicitly confirmed (positives) or denied (negatives) by the patient.
+   - Do NOT include allergies, medications, or history as symptoms.
+   - If patient says "no fiebre" → negatives: ["fiebre"]
+
+4. physicalExam: CRITICAL RULE - ONLY include findings from DOCTOR'S physical examination.
+   - Valid indicators: "a la exploración", "a la otoscopia", "se observa", "orofaringe", "amígdalas", "adenopatías", "temperatura", "TA", "FC", "auscultación"
+   - If data comes from PATIENT perception ("siento", "refiere", "me duele", "oído tapado", "sensación de") → goes in hpi/ros, NOT physicalExam
+   - If NO physical exam evidence in transcript → findings: [], vitals: []
+
+5. assessment: MANDATORY - ALWAYS populate assessment.primary
+   A) If doctor states explicit diagnosis (faringoamigdalitis, VPPB, rinosinusitis, etc.):
+      → Use it as assessment.primary.description, icd10 may be null
+   B) If NO explicit diagnosis stated:
+      → ALWAYS set assessment.primary using SYNDROMIC LABEL mapping below
+      → icd10 MUST be null
+      → differential MUST be []
+
+   SYNDROMIC LABEL MAPPING (use exactly one label, never concatenate with "y"):
+   | Symptom pattern | assessment.primary.description |
+   |-----------------|-------------------------------|
+   | dolor/ardor de garganta, odinofagia, dolor al deglutir | "Odinofagia a estudio" |
+   | vértigo rotatorio, mareo al girar/incorporarse | "Vértigo posicional a estudio" |
+   | congestión nasal + rinorrea + dolor/presión facial | "Síndrome rinosinusal a estudio" |
+   | otalgia, oído tapado, plenitud ótica | "Otalgia a estudio" |
+   | disfonía, ronquera | "Disfonía a estudio" |
+   | tinnitus, acúfenos | "Tinnitus a estudio" |
+   | If none match → "<main symptom> a estudio" (max 6 words, single label) |
+
+6. plan: ONLY tests/treatments explicitly ordered by doctor.
+
+## FORBIDDEN
+- Placeholders: "registrado", "no especificado", "sin información", "pendiente"
+- Concatenating symptoms in assessment: "Dolor de garganta y otalgia a estudio" ❌
+- Patient perceptions in physicalExam
 
 ## LANGUAGE
-- If the transcript is in Spanish, respond in Spanish
-- Use medical terminology appropriately
+Respond in Spanish if transcript is Spanish. Use standard medical terminology.
 
-## FINAL INSTRUCTION
-Respond with ONLY the JSON object. No explanations, no markdown, no additional text."""
+Respond with ONLY the JSON object. No markdown, no explanations."""
 
 
 def _build_user_prompt(transcript: Transcript, context: Optional[Context]) -> str:
