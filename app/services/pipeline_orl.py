@@ -6,9 +6,9 @@ Stages:
 1. Normalize (Medicalization)
 2. Clean (PII/Format)
 3. Chunk (Split long audio)
-4. Map (Extract per chunk)
-5. Reduce (Aggregate results)
-6. Finalize (Refine/Summary)
+4. Map (Extract per chunk) - Epic 15: lite extractor by default
+5. Reduce (Aggregate results) - Epic 15: uses ChunkExtractionResult
+6. Finalize (Refine/Summary) - FULL MedGemma (1 call)
 
 PHI-safe: Metrics only, no content logging.
 """
@@ -22,7 +22,9 @@ from app.core.config import get_settings
 from app.core.logging import get_safe_logger
 from app.schemas.request import Transcript, Context
 from app.schemas.structured_fields_v1 import StructuredFieldsV1
+from app.schemas.chunk_extraction_result import ChunkExtractionResult, ChunkEvidenceSummary
 from app.services.structured_v1_extractor import extract_structured_v1, _parse_v1_output
+from app.services.extractors.lite_extractor import extract_chunk_lite
 from app.services.pipeline_prompts import _build_finalize_prompt
 
 logger = get_safe_logger(__name__)
@@ -308,35 +310,60 @@ async def _run_pipeline_logic(
     metrics["chunkingEnabled"] = chunking_enabled
     current_t = mark_stage("chunk", current_t)
 
-    # 4. Map (Extract per chunk)
+    # 4. Map (Extract per chunk) - Epic 15: lite extractor by default
     # Using semaphore inside loop is redundant if the whole pipeline is semaphore-locked.
     # But useful if we increase PIPELINE_MAX_CONCURRENCY in future.
-    extracted_results: List[StructuredFieldsV1] = []
-    
+    chunk_results: List[ChunkExtractionResult] = []
+
+    # Determine extractor mode from config
+    map_extractor_mode = settings.map_extractor_mode
+
     # We need to capture the model version from the first extraction at least
-    last_model_version = "stub"
-    
-    for chunk in chunks:
+    last_model_version = "lite-v1" if map_extractor_mode == "lite" else "stub"
+
+    for chunk_idx, chunk in enumerate(chunks):
         # Time-boxed extraction per chunk
         try:
-            fields, infra_ms, model_ver = await asyncio.wait_for(
-                extract_structured_v1(chunk, context),
-                timeout=CHUNK_TIMEOUT_S
-            )
-            extracted_results.append(fields)
-            last_model_version = model_ver
-        except asyncio.TimeoutError:
-            # If a single chunk times out, what do we do?
-            # Option A: Fail pipeline -> Fallback (Safest for now)
-            logger.warning("Chunk extraction timeout")
-            raise 
+            if map_extractor_mode == "lite":
+                # Epic 15: Use lite extractor (cheap/fast)
+                chunk_result, infra_ms = await asyncio.wait_for(
+                    extract_chunk_lite(chunk, chunk_idx, context),
+                    timeout=CHUNK_TIMEOUT_S
+                )
+                chunk_results.append(chunk_result)
+                last_model_version = "lite-v1"
+            else:
+                # Full extractor (expensive, legacy behavior)
+                fields, infra_ms, model_ver = await asyncio.wait_for(
+                    extract_structured_v1(chunk, context),
+                    timeout=CHUNK_TIMEOUT_S
+                )
+                # Wrap in ChunkExtractionResult for uniform handling
+                chunk_result = ChunkExtractionResult(
+                    chunkIndex=chunk_idx,
+                    fields=fields,
+                    evidence=[],  # Full extractor doesn't produce evidence
+                    extractorUsed="full"
+                )
+                chunk_results.append(chunk_result)
+                last_model_version = model_ver
 
+        except asyncio.TimeoutError:
+            # If a single chunk times out, fail pipeline -> Fallback (Safest for now)
+            logger.warning("Chunk extraction timeout", chunk_index=chunk_idx)
+            raise
+
+    metrics["mapExtractorMode"] = map_extractor_mode
     current_t = mark_stage("map", current_t)
 
-    # 5. Reduce (Aggregate)
-    from app.services.aggregator import aggregate_structured_fields_v1
-    
-    final_fields = aggregate_structured_fields_v1(extracted_results)
+    # 5. Reduce (Aggregate) - Epic 15: uses ChunkExtractionResult wrapper
+    from app.services.aggregator import aggregate_chunk_results
+
+    final_fields, evidence_summaries = aggregate_chunk_results(chunk_results)
+
+    # Store evidence summaries for optional response inclusion
+    metrics["_evidence_summaries"] = evidence_summaries  # Internal, stripped before response
+
     current_t = mark_stage("reduce", current_t)
 
     # 6. Finalize (Refine)

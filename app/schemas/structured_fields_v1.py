@@ -4,9 +4,12 @@ Maps directly to Flutter wizard fields.
 
 PHI note: Contains patient data - NEVER log instances.
 """
-from typing import List, Literal, Optional
+from typing import List, Literal, Optional, TYPE_CHECKING
 
 from pydantic import BaseModel, Field
+
+if TYPE_CHECKING:
+    from app.schemas.chunk_extraction_result import ChunkEvidenceSummary
 
 
 class Antecedentes(BaseModel):
@@ -203,6 +206,17 @@ class V1ResponseMetadata(BaseModel):
         description="List of contract drift warnings (e.g. 'medicalization_drift')"
     )
 
+    # Epic 15: Chunk evidence (opt-in, backward compatible)
+    chunk_evidence: Optional[List["ChunkEvidenceSummary"]] = Field(
+        default=None,
+        alias="chunkEvidence",
+        description=(
+            "Evidence snippets per chunk (opt-in). "
+            "Only included if include_evidence_in_response=True. "
+            "Omitted (null) by default for backward compatibility."
+        )
+    )
+
     class Config:
         populate_by_name = True
 
@@ -215,3 +229,10 @@ class V1SuccessResponse(BaseModel):
 
     class Config:
         populate_by_name = True
+
+
+# Resolve forward references for Epic 15
+# Import here to avoid circular dependency at module load time
+from app.schemas.chunk_extraction_result import ChunkEvidenceSummary  # noqa: E402
+
+V1ResponseMetadata.model_rebuild()

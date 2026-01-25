@@ -136,6 +136,36 @@ class Settings(BaseSettings):
         description="Minimum segments per chunk before allowing split"
     )
 
+    # Epic 15: Map Extractor Mode configuration
+    map_extractor_mode: Literal["lite", "full"] = Field(
+        default="lite",
+        description=(
+            "Extractor mode for MAP stage: "
+            "'lite' = cheap baseline/short prompt (default), "
+            "'full' = full MedGemma extraction per chunk"
+        )
+    )
+    include_evidence_in_response: bool = Field(
+        default=False,
+        description=(
+            "Include chunk evidence in API response metadata. "
+            "False = backward compatible (no chunkEvidence field). "
+            "True = include chunkEvidence array in metadata."
+        )
+    )
+    lite_extractor_max_tokens: int = Field(
+        default=512,
+        ge=128,
+        le=2048,
+        description="Max tokens for lite extractor response"
+    )
+    evidence_max_snippets_per_chunk: int = Field(
+        default=5,
+        ge=1,
+        le=20,
+        description="Maximum evidence snippets to extract per chunk"
+    )
+
     @field_validator("firebase_credentials_json", mode="before")
     @classmethod
     def validate_credentials_json(cls, v: Optional[str]) -> Optional[str]:

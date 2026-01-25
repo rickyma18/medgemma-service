@@ -495,22 +495,29 @@ async def extract_structured_fields_v1(
     response_model=Union[V1SuccessResponse, ErrorResponse],
     status_code=status.HTTP_200_OK,
     summary="Extract structured ORL fields (Pipeline Map-Reduce)",
-    description="Processes a clinical transcript using the new Map-Reduce pipeline (Stub Mode).",
+    description="Processes a clinical transcript using the new Map-Reduce pipeline with lite extractor.",
     dependencies=[Depends(check_rate_limit)]
 )
 async def extract_structured_pipeline(
     request_body: ExtractRequest,
     request_id: Annotated[str, Depends(get_request_id)],
+    x_include_evidence: Annotated[str | None, Header(alias="X-Include-Evidence")] = None,
 ) -> Union[V1SuccessResponse, JSONResponse]:
     """
-    Pipeline-based extraction.
-    Currently stubbed to use legacy extractor via pipeline orchestrator.
+    Pipeline-based extraction with Epic 15 lite extractor.
+
+    Epic 15 Features:
+    - MAP stage uses lite extractor by default (cheap/fast)
+    - FINALIZE stage uses full MedGemma (1 call)
+    - Optional chunk evidence in response (X-Include-Evidence header or config)
     """
     from app.services.pipeline_orl import run_orl_pipeline
-    
+    from app.core.config import get_settings
+
     start_time = time.perf_counter()
     metrics_collector = get_metrics_collector()
-    
+    settings = get_settings()
+
     logger.info(
         "Pipeline extract request started",
         request_id=request_id,
@@ -524,15 +531,25 @@ async def extract_structured_pipeline(
             transcript=request_body.transcript,
             context=request_body.context
         )
-        
+
         latency_ms = int((time.perf_counter() - start_time) * 1000)
-        
+
         # Extract specific metrics for metadata
         model_version = pipeline_metrics.pop("modelVersion", "unknown")
-        # In this stub, inference_ms is functionally similar to map time or total pipeline time minus overhead
-        # We can approximate inference_ms as the "map" stage time if present
         inference_ms = pipeline_metrics.get("stageMs", {}).get("map", 0)
-        
+
+        # Epic 15: Extract evidence summaries (internal, not logged)
+        evidence_summaries = pipeline_metrics.pop("_evidence_summaries", None)
+
+        # Determine if evidence should be included in response
+        # Priority: header > config
+        include_evidence = (
+            x_include_evidence and x_include_evidence.lower() in ("true", "1", "yes")
+        ) or settings.include_evidence_in_response
+
+        # Build chunk evidence for response (only if opt-in)
+        chunk_evidence = evidence_summaries if include_evidence and evidence_summaries else None
+
         logger.info(
             "Pipeline extract request completed",
             request_id=request_id,
@@ -540,16 +557,17 @@ async def extract_structured_pipeline(
             status_code=200,
             latency_ms=latency_ms,
             model_version=model_version,
-            pipeline_metrics=pipeline_metrics
+            chunks_count=pipeline_metrics.get("chunksCount"),
+            map_extractor_mode=pipeline_metrics.get("mapExtractorMode"),
         )
-        
+
         metrics_collector.record_request(
             latency_ms=latency_ms,
             inference_ms=inference_ms,
             success=True,
             cache_hit=False
         )
-        
+
         return V1SuccessResponse(
             success=True,
             data=fields,
@@ -567,7 +585,15 @@ async def extract_structured_pipeline(
                 totalMs=latency_ms,
                 stageMs=pipeline_metrics.get("stageMs"),
                 source="pipeline",
-                fallbackReason=pipeline_metrics.get("fallbackReason")
+                fallbackReason=pipeline_metrics.get("fallbackReason"),
+                # Contract guard fields
+                medicalizationVersion=pipeline_metrics.get("medicalizationVersion"),
+                medicalizationGlossaryHash=pipeline_metrics.get("medicalizationGlossaryHash"),
+                normalizationVersion=pipeline_metrics.get("normalizationVersion"),
+                normalizationRulesHash=pipeline_metrics.get("normalizationRulesHash"),
+                contractWarnings=pipeline_metrics.get("contractWarnings", []),
+                # Epic 15: Chunk evidence (opt-in, backward compatible)
+                chunkEvidence=chunk_evidence,
             )
         )
 

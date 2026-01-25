@@ -6,15 +6,20 @@ Estrategia determinística:
 - Objetos (Exploración, Antecedentes): Union de campos. Si conflicto -> Concatenar.
 - Diagnóstico: Conservar el más específico (ej. definitivo > presuntivo > sindromico) o lista.
   NOTA: En V1 diagnostico es single. Estrategia: "Append" textos si diferentes.
+
+Epic 15: Added aggregate_chunk_results wrapper for ChunkExtractionResult support.
 """
-from typing import List, Optional, Any, Dict
+from typing import List, Optional, Any, Dict, TYPE_CHECKING
 from copy import deepcopy
 from app.schemas.structured_fields_v1 import (
-    StructuredFieldsV1, 
-    ExploracionFisica, 
-    Antecedentes, 
+    StructuredFieldsV1,
+    ExploracionFisica,
+    Antecedentes,
     Diagnostico
 )
+
+if TYPE_CHECKING:
+    from app.schemas.chunk_extraction_result import ChunkExtractionResult, ChunkEvidenceSummary
 
 SEPARATOR = " | "
 
@@ -135,5 +140,54 @@ def aggregate_structured_fields_v1(results: List[StructuredFieldsV1]) -> Structu
         estudiosIndicados=_merge_str_fields(estudios),
         notasAdicionales=_merge_str_fields(notas)
     )
-    
+
     return merged
+
+
+# === Epic 15: ChunkExtractionResult wrapper ===
+
+def aggregate_chunk_results(
+    chunk_results: List["ChunkExtractionResult"]
+) -> tuple[StructuredFieldsV1, List["ChunkEvidenceSummary"]]:
+    """
+    Aggregate a list of ChunkExtractionResult into unified fields + evidence summary.
+
+    This is a wrapper that:
+    1. Extracts StructuredFieldsV1 from each ChunkExtractionResult
+    2. Calls aggregate_structured_fields_v1() (unchanged public signature)
+    3. Collects evidence summaries for optional response inclusion
+
+    Args:
+        chunk_results: List of ChunkExtractionResult, sorted by chunkIndex
+
+    Returns:
+        Tuple of (aggregated StructuredFieldsV1, list of ChunkEvidenceSummary)
+
+    Note: Evidence can be used by finalize stage or included in response (opt-in).
+    """
+    # Import here to avoid circular dependency
+    from app.schemas.chunk_extraction_result import ChunkEvidenceSummary
+
+    if not chunk_results:
+        return StructuredFieldsV1(), []
+
+    # Sort by chunk index for determinism
+    sorted_results = sorted(chunk_results, key=lambda x: x.chunk_index)
+
+    # Extract fields for aggregation
+    fields_list = [cr.fields for cr in sorted_results]
+
+    # Aggregate using existing function (signature unchanged)
+    aggregated = aggregate_structured_fields_v1(fields_list)
+
+    # Build evidence summaries
+    evidence_summaries: List[ChunkEvidenceSummary] = []
+    for cr in sorted_results:
+        if cr.evidence:
+            summary = ChunkEvidenceSummary(
+                chunkIndex=cr.chunk_index,
+                snippets=[e.text for e in cr.evidence]
+            )
+            evidence_summaries.append(summary)
+
+    return aggregated, evidence_summaries
