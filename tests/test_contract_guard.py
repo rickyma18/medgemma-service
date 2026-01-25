@@ -183,7 +183,7 @@ class TestHashMismatch:
                 result = contract_guard_module.check_contracts()
 
                 assert result["medicalizationDrift"] is True
-                assert "medicalization_drift" in result["warnings"]
+                assert "DRIFT:medicalization_drift" in result["warnings"]
 
     def test_normalization_drift_when_hash_differs(self, contract_guard_module):
         """When normalization hash differs, drift should be detected."""
@@ -198,7 +198,7 @@ class TestHashMismatch:
                 result = contract_guard_module.check_contracts()
 
                 assert result["normalizationDrift"] is True
-                assert "normalization_drift" in result["warnings"]
+                assert "DRIFT:normalization_drift" in result["warnings"]
 
     def test_both_drift_when_both_hashes_differ(self, contract_guard_module):
         """When both hashes differ, both drifts should be detected."""
@@ -208,8 +208,8 @@ class TestHashMismatch:
 
                 assert result["medicalizationDrift"] is True
                 assert result["normalizationDrift"] is True
-                assert "medicalization_drift" in result["warnings"]
-                assert "normalization_drift" in result["warnings"]
+                assert "DRIFT:medicalization_drift" in result["warnings"]
+                assert "DRIFT:normalization_drift" in result["warnings"]
 
     def test_has_drift_true_when_medicalization_differs(self, contract_guard_module):
         """has_drift() should return True when medicalization hash differs."""
@@ -547,7 +547,7 @@ class TestRealDrift:
 
                     assert result["medicalizationDrift"] is True
                     assert result["normalizationDrift"] is False
-                    assert "medicalization_drift" in result["warnings"]
+                    assert "DRIFT:medicalization_drift" in result["warnings"]
                     assert result["details"]["medicalization"]["match"] is False
 
     def test_normalization_real_drift(self, contract_guard_module):
@@ -566,7 +566,7 @@ class TestRealDrift:
 
                     assert result["medicalizationDrift"] is False
                     assert result["normalizationDrift"] is True
-                    assert "normalization_drift" in result["warnings"]
+                    assert "DRIFT:normalization_drift" in result["warnings"]
 
     def test_both_real_drift(self, contract_guard_module):
         """When both hashes differ, both drifts should be TRUE."""
@@ -584,8 +584,8 @@ class TestRealDrift:
 
                     assert result["medicalizationDrift"] is True
                     assert result["normalizationDrift"] is True
-                    assert "medicalization_drift" in result["warnings"]
-                    assert "normalization_drift" in result["warnings"]
+                    assert "DRIFT:medicalization_drift" in result["warnings"]
+                    assert "DRIFT:normalization_drift" in result["warnings"]
 
 
 class TestContractSnapshotFiles:

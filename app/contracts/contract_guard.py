@@ -164,7 +164,7 @@ def _check_single_contract(
         )
         return {
             "drift": True,
-            "warning": f"{contract_name}_drift",
+            "warning": f"DRIFT:{contract_name}_drift",
             "details": {
                 "expected": expected,
                 "actual": actual,

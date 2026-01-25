@@ -205,6 +205,13 @@ class V1ResponseMetadata(BaseModel):
         alias="contractWarnings",
         description="List of contract drift warnings (e.g. 'medicalization_drift')"
     )
+    
+    # Epic 16.3: Contract Status Summary (UX)
+    contract_status: Literal["ok", "warning", "drift"] = Field(
+        default="ok",
+        alias="contractStatus",
+        description="Simple drift status for UX: ok|warning|drift"
+    )
 
     # Epic 15: Chunk evidence (opt-in, backward compatible)
     chunk_evidence: Optional[List["ChunkEvidenceSummary"]] = Field(

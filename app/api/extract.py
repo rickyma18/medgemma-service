@@ -592,6 +592,7 @@ async def extract_structured_pipeline(
                 normalizationVersion=pipeline_metrics.get("normalizationVersion"),
                 normalizationRulesHash=pipeline_metrics.get("normalizationRulesHash"),
                 contractWarnings=pipeline_metrics.get("contractWarnings", []),
+                contractStatus=pipeline_metrics.get("contractStatus", "ok"),
                 # Epic 15: Chunk evidence (opt-in, backward compatible)
                 chunkEvidence=chunk_evidence,
             )

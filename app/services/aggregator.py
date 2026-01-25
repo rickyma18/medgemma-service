@@ -8,6 +8,7 @@ Estrategia determinística:
   NOTA: En V1 diagnostico es single. Estrategia: "Append" textos si diferentes.
 
 Epic 15: Added aggregate_chunk_results wrapper for ChunkExtractionResult support.
+Epic 16: Added reduce_v2 with field-specific strategies and conflict detection.
 """
 from typing import List, Optional, Any, Dict, TYPE_CHECKING
 from copy import deepcopy
@@ -20,6 +21,7 @@ from app.schemas.structured_fields_v1 import (
 
 if TYPE_CHECKING:
     from app.schemas.chunk_extraction_result import ChunkExtractionResult, ChunkEvidenceSummary
+    from app.services.reducer_v2 import IntermediateResult
 
 SEPARATOR = " | "
 
@@ -191,3 +193,56 @@ def aggregate_chunk_results(
             evidence_summaries.append(summary)
 
     return aggregated, evidence_summaries
+
+
+# === Epic 16: Reducer V2 with conflict tracking ===
+
+def aggregate_chunk_results_v2(
+    chunk_results: List["ChunkExtractionResult"]
+) -> tuple[StructuredFieldsV1, List["ChunkEvidenceSummary"], "IntermediateResult"]:
+    """
+    Epic 16: Aggregate chunks using improved reducer with conflict detection.
+
+    Returns:
+        Tuple of (final_fields, evidence_summaries, intermediate_result)
+
+    The intermediate_result contains conflict markers for finalize stage.
+    Epic 16.2: Applies sanitization to final fields before returning.
+    """
+    from app.schemas.chunk_extraction_result import ChunkEvidenceSummary
+    from app.services.reducer_v2 import reduce_chunk_fields_v2
+    from app.services.sanitizers.structured_fields_v1_sanitizer import (
+        sanitize_structured_fields_v1,
+    )
+
+    if not chunk_results:
+        from app.services.reducer_v2 import IntermediateResult
+        return StructuredFieldsV1(), [], IntermediateResult(
+            fields=StructuredFieldsV1(),
+            conflicts=[],
+            chunk_count=0
+        )
+
+    # Sort by chunk index for determinism
+    sorted_results = sorted(chunk_results, key=lambda x: x.chunk_index)
+
+    # Extract fields for aggregation
+    fields_list = [cr.fields for cr in sorted_results]
+
+    # Use V2 reducer with conflict tracking
+    intermediate = reduce_chunk_fields_v2(fields_list)
+
+    # Build evidence summaries
+    evidence_summaries: List[ChunkEvidenceSummary] = []
+    for cr in sorted_results:
+        if cr.evidence:
+            summary = ChunkEvidenceSummary(
+                chunkIndex=cr.chunk_index,
+                snippets=[e.text for e in cr.evidence]
+            )
+            evidence_summaries.append(summary)
+
+    # Epic 16.2: Sanitize final fields before returning
+    sanitized_fields = sanitize_structured_fields_v1(intermediate.fields)
+
+    return sanitized_fields, evidence_summaries, intermediate

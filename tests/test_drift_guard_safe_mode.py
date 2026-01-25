@@ -55,7 +55,7 @@ class TestDriftGuardSafeMode:
                 mock_check.return_value = {
                     "medicalizationDrift": True,
                     "normalizationDrift": False,
-                    "warnings": ["medicalization_drift"],
+                    "warnings": ["DRIFT:medicalization_drift"],
                     "details": {
                         "medicalization": {
                             "expected": "hash1",
@@ -134,7 +134,7 @@ class TestDriftGuardSafeMode:
                 mock_check.return_value = {
                     "medicalizationDrift": True,
                     "normalizationDrift": True,
-                    "warnings": ["medicalization_drift", "normalization_drift"],
+                    "warnings": ["DRIFT:medicalization_drift", "DRIFT:normalization_drift"],
                     "details": {}
                 }
 
@@ -159,7 +159,7 @@ class TestDriftGuardSafeMode:
         """
         with patch("app.services.pipeline_orl.get_settings", return_value=mock_settings_safe_mode):
             with patch("app.contracts.contract_guard.check_contracts") as mock_check:
-                expected_warnings = ["medicalization_drift", "normalization_drift"]
+                expected_warnings = ["DRIFT:medicalization_drift", "DRIFT:normalization_drift"]
                 mock_check.return_value = {
                     "medicalizationDrift": True,
                     "normalizationDrift": True,
@@ -207,7 +207,7 @@ class TestDriftGuardOffMode:
                 mock_check.return_value = {
                     "medicalizationDrift": True,
                     "normalizationDrift": False,
-                    "warnings": ["medicalization_drift"],
+                    "warnings": ["DRIFT:medicalization_drift"],
                     "details": {}
                 }
 
@@ -230,4 +230,4 @@ class TestDriftGuardOffMode:
                             mock_emit.assert_not_called()
 
                             # But warnings should still be in metrics
-                            assert metrics["contractWarnings"] == ["medicalization_drift"]
+                            assert metrics["contractWarnings"] == ["DRIFT:medicalization_drift"]

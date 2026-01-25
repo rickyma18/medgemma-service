@@ -65,6 +65,7 @@ async def run_orl_pipeline(
         "normalizationVersion": None,
         "normalizationRulesHash": None,
         "contractWarnings": [],
+        "contractStatus": "ok",
         "contractDetails": None
     }
     
@@ -191,7 +192,17 @@ async def _run_pipeline_logic(
     # Always set list (never None)
     metrics["contractWarnings"] = contract_warnings
     metrics["contractDetails"] = contract_details
-
+    
+    # Analyze drift nature
+    has_drift = any(w.startswith("DRIFT:") for w in contract_warnings)
+    
+    # Initial status logic (pending safe mode decision)
+    if not contract_warnings:
+        metrics["contractStatus"] = "ok"
+    else:
+        # Default to warning - only becomes drift if we force fallback below
+        metrics["contractStatus"] = "warning"
+        
     current_t = mark_stage("contract_guard", current_t)
 
     # 1.6. Drift Guard - Telemetry & Safe Mode (PHI-safe)
@@ -227,11 +238,14 @@ async def _run_pipeline_logic(
             logger.warning("Drift telemetry emit failed", error=str(e))
 
         # Safe mode: force fallback to prevent serving with drifted contracts
-        if drift_guard_mode == "safe":
+        if drift_guard_mode == "safe" and has_drift:
             logger.warning(
                 "Drift guard safe mode triggered - forcing fallback",
                 warnings=contract_warnings
             )
+            # Logic: If safe mode forces fallback -> drift
+            metrics["contractStatus"] = "drift"
+            
             return await _fallback_to_baseline(
                 transcript, context, metrics, start_time, "contract_drift"
             )
