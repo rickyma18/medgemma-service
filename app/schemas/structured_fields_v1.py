@@ -4,7 +4,7 @@ Maps directly to Flutter wizard fields.
 
 PHI note: Contains patient data - NEVER log instances.
 """
-from typing import Literal, Optional
+from typing import List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -167,10 +167,41 @@ class V1ResponseMetadata(BaseModel):
     pipeline_used: Optional[str] = Field(default=None, alias="pipelineUsed")
     chunks_count: Optional[int] = Field(default=None, alias="chunksCount")
     normalization_replacements: Optional[int] = Field(default=None, alias="normalizationReplacements")
+    medicalization_replacements: Optional[int] = Field(default=None, alias="medicalizationReplacements")
+    negation_spans: Optional[int] = Field(default=None, alias="negationSpans")
     total_ms: Optional[int] = Field(default=None, alias="totalMs")
     stage_ms: Optional[dict] = Field(default=None, alias="stageMs")
     source: Optional[str] = Field(default=None, description="Extraction source (legacy/pipeline)")
     fallback_reason: Optional[str] = Field(default=None, alias="fallbackReason")
+
+    # Contract freeze / anti-drift fields (PHI-safe)
+    medicalization_version: Optional[str] = Field(
+        default=None,
+        alias="medicalizationVersion",
+        description="Medicalization glossary version (e.g. 'v1')"
+    )
+    medicalization_glossary_hash: Optional[str] = Field(
+        default=None,
+        alias="medicalizationGlossaryHash",
+        description="SHA256 hex of glossary JSON for drift detection"
+    )
+    normalization_version: Optional[str] = Field(
+        default=None,
+        alias="normalizationVersion",
+        description="Normalization rules version (e.g. 'v1')"
+    )
+    normalization_rules_hash: Optional[str] = Field(
+        default=None,
+        alias="normalizationRulesHash",
+        description="SHA256 hex of canonical rules for drift detection"
+    )
+
+    # Contract guard warnings (drift detection)
+    contract_warnings: List[str] = Field(
+        default_factory=list,
+        alias="contractWarnings",
+        description="List of contract drift warnings (e.g. 'medicalization_drift')"
+    )
 
     class Config:
         populate_by_name = True

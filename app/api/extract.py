@@ -562,6 +562,8 @@ async def extract_structured_pipeline(
                 pipelineUsed=pipeline_metrics.get("pipelineUsed"),
                 chunksCount=pipeline_metrics.get("chunksCount"),
                 normalizationReplacements=pipeline_metrics.get("normalizationReplacements"),
+                medicalizationReplacements=pipeline_metrics.get("medicalizationReplacements"),
+                negationSpans=pipeline_metrics.get("negationSpans"),
                 totalMs=latency_ms,
                 stageMs=pipeline_metrics.get("stageMs"),
                 source="pipeline",

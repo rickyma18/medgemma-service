@@ -1,0 +1,321 @@
+{
+  "version": "1.0.0",
+  "last_updated": "2025-01-14",
+  "description": "Diccionario de mapeos coloquial → clínico para Fase 1 de medicalización. Solo mapeos SEGUROS sin ambigüedad semántica. Incluir advertencias cuando el mapeo es condicional. NO mapear síntomas a diagnósticos.",
+  "total_mappings": 57,
+
+  "symptoms": {
+    "me duele la cabeza": {
+      "clinical": "refiere cefalea",
+      "note": "Mapping compuesto con prioridad sobre voice_transform"
+    },
+    "me duele mucho la cabeza": {
+      "clinical": "refiere cefalea intensa",
+      "note": "Mapping compuesto con intensidad"
+    },
+    "tengo dolor de cabeza": {
+      "clinical": "presenta cefalea",
+      "note": "Mapping compuesto con prioridad sobre voice_transform"
+    },
+    "dolor de cabeza": {
+      "clinical": "cefalea",
+      "note": "Solo si es dolor cefálico real, no expresión"
+    },
+    "agruras": {
+      "clinical": "pirosis",
+      "note": null
+    },
+    "acidez": {
+      "clinical": "pirosis",
+      "note": null
+    },
+    "falta de aire": {
+      "clinical": "disnea",
+      "note": "Especificar: de esfuerzo, en reposo, paroxística si se menciona"
+    },
+    "me ahogo": {
+      "clinical": "refiere disnea",
+      "note": null
+    },
+    "mareo": {
+      "clinical": "mareo",
+      "note": "NO asumir vértigo sin contexto rotatorio explícito"
+    },
+    "vértigo": {
+      "clinical": "vértigo",
+      "note": null
+    },
+    "náusea": {
+      "clinical": "náusea",
+      "note": null
+    },
+    "ganas de vomitar": {
+      "clinical": "náusea",
+      "note": null
+    },
+    "vomité": {
+      "clinical": "presenta vómito",
+      "note": null
+    },
+    "diarrea": {
+      "clinical": "evacuaciones diarreicas",
+      "note": "Cuantificar si se menciona frecuencia"
+    },
+    "estreñimiento": {
+      "clinical": "constipación",
+      "note": null
+    },
+    "no puedo ir al baño": {
+      "clinical": "refiere constipación",
+      "note": null
+    },
+    "hinchazón": {
+      "clinical": "edema",
+      "note": "Solo si hay evidencia de retención, si no usar distensión"
+    },
+    "adormecimiento": {
+      "clinical": "parestesias",
+      "note": null
+    },
+    "hormigueo": {
+      "clinical": "parestesias",
+      "note": null
+    },
+    "debilidad": {
+      "clinical": "astenia",
+      "note": "Distinguir fatiga vs paresia si hay contexto"
+    },
+    "cansancio": {
+      "clinical": "astenia",
+      "note": null
+    },
+    "comezón": {
+      "clinical": "prurito",
+      "note": null
+    },
+    "picazón": {
+      "clinical": "prurito",
+      "note": null
+    },
+    "salpullido": {
+      "clinical": "erupción cutánea",
+      "note": null
+    },
+    "ronchas": {
+      "clinical": "urticaria",
+      "note": null
+    },
+    "latidos rápidos": {
+      "clinical": "palpitaciones",
+      "note": "NO asumir arritmia sin ECG"
+    },
+    "sudoración": {
+      "clinical": "diaforesis",
+      "note": null
+    },
+    "calentura": {
+      "clinical": "fiebre",
+      "note": "Usar sensación febril si no se confirma temperatura"
+    }
+  },
+
+  "symptoms_orl": {
+    "me duele el oído": {
+      "clinical": "refiere otalgia",
+      "note": "Mapping compuesto con prioridad sobre voice_transform"
+    },
+    "me duele la garganta": {
+      "clinical": "refiere odinofagia",
+      "note": "Mapping compuesto con prioridad sobre voice_transform"
+    },
+    "dolor de oído": {
+      "clinical": "otalgia",
+      "note": null
+    },
+    "no oigo bien": {
+      "clinical": "hipoacusia",
+      "note": "No asumir sordera completa"
+    },
+    "zumbido en el oído": {
+      "clinical": "acúfeno",
+      "note": null
+    },
+    "zumbido": {
+      "clinical": "acúfeno",
+      "note": "Solo si contexto es oído"
+    },
+    "me sale pus del oído": {
+      "clinical": "otorrea purulenta",
+      "note": null
+    },
+    "nariz tapada": {
+      "clinical": "obstrucción nasal",
+      "note": null
+    },
+    "moco": {
+      "clinical": "rinorrea",
+      "note": "Especificar: hialina, mucopurulenta si se describe"
+    },
+    "flujo nasal": {
+      "clinical": "rinorrea",
+      "note": null
+    },
+    "me sangra la nariz": {
+      "clinical": "epistaxis",
+      "note": null
+    },
+    "sangrado nasal": {
+      "clinical": "epistaxis",
+      "note": null
+    },
+    "no huelo": {
+      "clinical": "anosmia",
+      "note": null
+    },
+    "perdí el olfato": {
+      "clinical": "anosmia",
+      "note": null
+    },
+    "dolor de garganta": {
+      "clinical": "odinofagia",
+      "note": null
+    },
+    "no puedo pasar": {
+      "clinical": "disfagia",
+      "note": "Caracterizar: sólidos, líquidos, ambos si se menciona"
+    },
+    "no puedo tragar": {
+      "clinical": "disfagia",
+      "note": null
+    },
+    "ronquera": {
+      "clinical": "disfonía",
+      "note": null
+    },
+    "se me fue la voz": {
+      "clinical": "afonía",
+      "note": null
+    },
+    "ronco al dormir": {
+      "clinical": "roncopatía",
+      "note": null
+    },
+    "ronquidos": {
+      "clinical": "roncopatía",
+      "note": null
+    },
+    "me ahogo dormido": {
+      "clinical": "sospecha de SAOS",
+      "note": "NO diagnosticar sin estudio del sueño"
+    },
+    "carraspera": {
+      "clinical": "carraspeo crónico",
+      "note": null
+    },
+    "ganglios inflamados": {
+      "clinical": "adenopatías cervicales",
+      "note": null
+    },
+    "bolita en el cuello": {
+      "clinical": "masa cervical",
+      "note": "NUNCA decir tumor sin confirmación"
+    }
+  },
+
+  "antecedentes": {
+    "azúcar": {
+      "clinical": "diabetes mellitus",
+      "note": "Usar DM2 si adulto típico, DM1 si se especifica"
+    },
+    "soy diabético": {
+      "clinical": "diabetes mellitus",
+      "note": null
+    },
+    "presión alta": {
+      "clinical": "hipertensión arterial",
+      "note": null
+    },
+    "del corazón": {
+      "clinical": "cardiopatía",
+      "note": "Especificar si se sabe tipo"
+    },
+    "del riñón": {
+      "clinical": "enfermedad renal",
+      "note": "Especificar aguda/crónica si se sabe"
+    },
+    "asma": {
+      "clinical": "asma bronquial",
+      "note": null
+    },
+    "de la tiroides": {
+      "clinical": "tireopatía",
+      "note": "Especificar hipo/hiper si se menciona"
+    },
+    "reflujo": {
+      "clinical": "ERGE",
+      "note": null
+    },
+    "colesterol alto": {
+      "clinical": "dislipidemia",
+      "note": null
+    }
+  },
+
+  "habits": {
+    "fumo": {
+      "clinical": "tabaquismo activo",
+      "note": "Cuantificar paquetes/año si posible"
+    },
+    "fumador": {
+      "clinical": "tabaquismo activo",
+      "note": null
+    },
+    "tomo alcohol": {
+      "clinical": "consumo de alcohol",
+      "note": "Cuantificar frecuencia"
+    },
+    "tomador": {
+      "clinical": "consumo de alcohol",
+      "note": null
+    },
+    "no hago ejercicio": {
+      "clinical": "sedentarismo",
+      "note": null
+    }
+  },
+
+  "voice_transforms": {
+    "me duele": {
+      "clinical": "refiere dolor en",
+      "note": "Convertir 1ª persona a 3ª persona clínica"
+    },
+    "tengo": {
+      "clinical": "presenta",
+      "note": null
+    },
+    "siento": {
+      "clinical": "refiere",
+      "note": null
+    },
+    "creo que tengo": {
+      "clinical": "refiere posible",
+      "note": "Preservar incertidumbre del paciente"
+    },
+    "como que": {
+      "clinical": "refiere sensación de",
+      "note": null
+    },
+    "no me duele": {
+      "clinical": "niega dolor",
+      "note": "CRÍTICO: preservar negación"
+    },
+    "no tengo": {
+      "clinical": "niega",
+      "note": null
+    },
+    "sin": {
+      "clinical": "niega",
+      "note": "Transformación directa de negación para combinación con síntomas"
+    }
+  }
+}

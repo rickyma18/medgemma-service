@@ -1,0 +1,68 @@
+[
+  {
+    "id": "orl_001_cleaner_basic",
+    "description": "Removal of basic fillers and normalization",
+    "input": "Este... bueno pues me duele, eh... un poco.",
+    "expected": {
+      "cleaned": "refiere dolor en, un poco.",
+      "medicalized": "Este... bueno pues refiere dolor en, eh... un poco.",
+      "replacements": 1,
+      "negationSpans": 0
+    }
+  },
+  {
+    "id": "orl_002_basic_replacement",
+    "description": "Simple symptom replacement",
+    "input": "Me duele la cabeza.",
+    "expected": {
+      "cleaned": "Refiere cefalea.",
+      "medicalized": "Refiere cefalea.",
+      "replacements": 1,
+      "negationSpans": 0
+    }
+  },
+  {
+    "id": "orl_003_voice_transform",
+    "description": "Voice transformation priority",
+    "input": "Me duele el brazo.",
+    "expected": {
+      "cleaned": "Refiere dolor en el brazo.",
+      "medicalized": "Refiere dolor en el brazo.",
+      "replacements": 1,
+      "negationSpans": 0
+    }
+  },
+  {
+    "id": "orl_004_negation_blocking",
+    "description": "Negation blocks replacement",
+    "input": "No tengo dolor de cabeza.",
+    "expected": {
+      "cleaned": "No tengo dolor de cabeza.",
+      "medicalized": "No tengo dolor de cabeza.",
+      "replacements": 0,
+      "negationSpans": 1
+    }
+  },
+  {
+    "id": "orl_005_adversative",
+    "description": "Adversative breaks negation",
+    "input": "No tengo fiebre pero me duele la cabeza.",
+    "expected": {
+      "cleaned": "No tengo fiebre pero refiere cefalea.",
+      "medicalized": "No tengo fiebre pero refiere cefalea.",
+      "replacements": 1,
+      "negationSpans": 1
+    }
+  },
+  {
+    "id": "orl_006_list_negation",
+    "description": "List extends negation",
+    "input": "No tengo mareo ni vómito.",
+    "expected": {
+      "cleaned": "No tengo mareo ni vómito.",
+      "medicalized": "No tengo mareo ni vómito.",
+      "replacements": 0,
+      "negationSpans": 1
+    }
+  }
+]

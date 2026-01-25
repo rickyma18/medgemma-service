@@ -85,6 +85,23 @@ class Settings(BaseSettings):
     host: str = Field(default="0.0.0.0", description="Server host")
     port: int = Field(default=8080, description="Server port")
 
+    # Drift Guard configuration
+    drift_guard_mode: Literal["off", "warn", "safe"] = Field(
+        default="warn",
+        description=(
+            "Drift guard mode: "
+            "'off' = ignore contract drift, "
+            "'warn' = emit telemetry event on drift, "
+            "'safe' = emit event AND force fallback_baseline on drift"
+        )
+    )
+    drift_guard_cooldown_s: int = Field(
+        default=3600,
+        ge=0,
+        le=86400,
+        description="Cooldown in seconds between drift telemetry events (0 = no cooldown)"
+    )
+
     @field_validator("firebase_credentials_json", mode="before")
     @classmethod
     def validate_credentials_json(cls, v: Optional[str]) -> Optional[str]:

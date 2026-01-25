@@ -54,3 +54,7 @@ secrets/
 secrets/*.json
 .env
 .env.*
+
+# local / debug
+.claude/settings.local.json
+debug_output*.txt

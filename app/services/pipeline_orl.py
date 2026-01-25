@@ -54,8 +54,16 @@ async def run_orl_pipeline(
         "pipelineUsed": "orl_pipeline_stub",
         "chunksCount": 0,
         "normalizationReplacements": 0,
+        "medicalizationReplacements": 0,
+        "negationSpans": 0,
         "stageMs": {},
-        "fallbackReason": None
+        "fallbackReason": None,
+        "medicalizationVersion": None,
+        "medicalizationGlossaryHash": None,
+        "normalizationVersion": None,
+        "normalizationRulesHash": None,
+        "contractWarnings": [],
+        "contractDetails": None
     }
     
     try:
@@ -90,12 +98,143 @@ async def _run_pipeline_logic(
         return time.perf_counter()
 
     current_t = start_time
+    
+    # 0. Medicalization (Step 0)
+    # Apply medicalization to each segment
+    try:
+        from app.services.medicalization.medicalization_service import apply_medicalization
+        from app.services.medicalization.medicalization_glossary import (
+            get_glossary_hash,
+            get_glossary_version
+        )
+
+        # We modify transcript in place? No, create new one to be safe/functional
+        # Actually pipeline flows are usually sequential transformations.
+
+        total_med_replacements = 0
+        total_neg_spans = 0
+
+        medicalized_transcript = transcript.model_copy(deep=True)
+
+        for seg in medicalized_transcript.segments:
+            med_text, res_metrics = apply_medicalization(seg.text)
+            seg.text = med_text
+            total_med_replacements += res_metrics.get("replacementsCount", 0)
+            total_neg_spans += res_metrics.get("negationSpansCount", 0)
+
+        metrics["medicalizationReplacements"] = total_med_replacements
+        metrics["negationSpans"] = total_neg_spans
+
+        # Inject version/hash for contract freeze (PHI-safe)
+        glossary_hash = get_glossary_hash()
+        if glossary_hash:
+            metrics["medicalizationVersion"] = get_glossary_version()
+            metrics["medicalizationGlossaryHash"] = glossary_hash
+
+        # Pass to next stage
+        # But wait, we used local variable 'medicalized_transcript'.
+        # We should update 'transcript' variable for next steps?
+        # Or rename flow variable. Let's use 'current_transcript'.
+        current_transcript = medicalized_transcript
+
+    except Exception as e:
+        # Soft fail - leave version/hash as None
+        logger.warning("Medicalization step failed", error=str(e))
+        metrics["fallbackReason"] = f"medicalization_failed:{type(e).__name__}"
+        current_transcript = transcript # fallback to original
+
+    current_t = mark_stage("medicalization", current_t)
 
     # 1. Normalize
-    from app.services.text_normalizer_orl import normalize_transcript_orl
-    normalized_transcript, replacements = normalize_transcript_orl(transcript)
-    metrics["normalizationReplacements"] = replacements
+    try:
+        from app.services.text_normalizer_orl import normalize_transcript_orl
+        from app.services.normalization.normalization_contract import (
+            get_normalization_hash,
+            get_normalization_version
+        )
+
+        normalized_transcript, replacements = normalize_transcript_orl(current_transcript)
+        metrics["normalizationReplacements"] = replacements
+
+        # Inject version/hash for contract freeze (PHI-safe)
+        norm_hash = get_normalization_hash()
+        if norm_hash:
+            metrics["normalizationVersion"] = get_normalization_version()
+            metrics["normalizationRulesHash"] = norm_hash
+
+    except Exception as e:
+        # Soft fail - leave version/hash as None, use original transcript
+        logger.warning("Normalization step failed", error=str(e))
+        if not metrics.get("fallbackReason"):
+            metrics["fallbackReason"] = f"normalization_failed:{type(e).__name__}"
+        normalized_transcript = current_transcript
+
     current_t = mark_stage("normalize", current_t)
+
+    # 1.5. Contract Guard - Drift detection (PHI-safe)
+    contract_warnings: List[str] = []
+    contract_details: Optional[Dict[str, Any]] = None
+
+    try:
+        from app.contracts.contract_guard import check_contracts
+
+        contract_result = check_contracts()
+        contract_warnings = contract_result.get("warnings", []) or []
+        contract_details = contract_result.get("details")
+
+    except Exception as e:
+        # Soft fail - never break pipeline
+        logger.warning("Contract guard check failed", error=str(e))
+
+    # Always set list (never None)
+    metrics["contractWarnings"] = contract_warnings
+    metrics["contractDetails"] = contract_details
+
+    current_t = mark_stage("contract_guard", current_t)
+
+    # 1.6. Drift Guard - Telemetry & Safe Mode (PHI-safe)
+    settings = get_settings()
+    drift_guard_mode = settings.drift_guard_mode
+    drift_guard_cooldown = settings.drift_guard_cooldown_s
+
+    if contract_warnings and drift_guard_mode in ("warn", "safe"):
+        # Emit telemetry event (rate-limited)
+        try:
+            from app.services.telemetry import emit_event
+
+            # Build PHI-safe payload (NO transcript/segments/text!)
+            drift_payload = {
+                "warnings": contract_warnings,
+                "details": contract_details,
+                "pipelineUsed": metrics.get("pipelineUsed"),
+                "medicalizationVersion": metrics.get("medicalizationVersion"),
+                "medicalizationGlossaryHash": metrics.get("medicalizationGlossaryHash"),
+                "normalizationVersion": metrics.get("normalizationVersion"),
+                "normalizationRulesHash": metrics.get("normalizationRulesHash"),
+                "driftGuardMode": drift_guard_mode,
+            }
+
+            emit_event(
+                name="contract_drift_detected",
+                payload=drift_payload,
+                cooldown_s=drift_guard_cooldown
+            )
+
+        except Exception as e:
+            # Telemetry failure should never break pipeline
+            logger.warning("Drift telemetry emit failed", error=str(e))
+
+        # Safe mode: force fallback to prevent serving with drifted contracts
+        if drift_guard_mode == "safe":
+            logger.warning(
+                "Drift guard safe mode triggered - forcing fallback",
+                warnings=contract_warnings
+            )
+            return await _fallback_to_baseline(
+                transcript, context, metrics, start_time, "contract_drift"
+            )
+
+    current_t = mark_stage("drift_guard", current_t)
 
     # 2. Clean
     from app.services.transcript_cleaner import clean_transcript
