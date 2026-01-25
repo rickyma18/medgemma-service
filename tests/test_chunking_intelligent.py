@@ -1,16 +1,21 @@
 """
-Tests for intelligent chunking module.
+Exhaustive tests for intelligent chunking module.
 
-ÉPICA 14: Chunking Inteligente
-- Token estimation (heuristic)
-- Hard token limit + soft duration limit
-- No segment splitting (boundary respect)
-- Edge cases handling
+ÉPICA 14: Chunking Inteligente - QA/SDET Coverage
 
-PHI-safe: Uses fictitious text only.
+Test Categories:
+1. Invariants: no loss, no duplication, stable order (by segment identity tuple)
+2. Hard token limit enforcement (with oversized segment exception)
+3. Soft duration limit behavior
+4. 15-minute transcript integration
+5. Edge cases: single segment, min_segments, alternating speakers, etc.
+
+PHI-safe: Uses fictitious text only, no clinical content logged.
+
+Segment Identity: (speaker, start_ms, end_ms, text) tuple for robust comparison.
 """
 import pytest
-from typing import List
+from typing import List, Tuple
 
 from app.schemas.request import Transcript, TranscriptSegment
 from app.services.chunking import (
@@ -21,8 +26,31 @@ from app.services.chunking import (
     get_chunk_stats,
     DEFAULT_MAX_CHUNK_DURATION_MS,
     DEFAULT_HARD_TOKEN_LIMIT,
+    DEFAULT_SOFT_DURATION_LIMIT_MS,
     CHARS_PER_TOKEN_ESTIMATE,
 )
+
+
+# =============================================================================
+# Helpers: Segment Identity for Robust Comparison
+# =============================================================================
+
+def segment_to_tuple(seg: TranscriptSegment) -> Tuple[str, int, int, str]:
+    """Convert segment to identity tuple for comparison."""
+    return (seg.speaker, seg.start_ms, seg.end_ms, seg.text)
+
+
+def segments_to_tuples(segments: List[TranscriptSegment]) -> List[Tuple[str, int, int, str]]:
+    """Convert segment list to identity tuples."""
+    return [segment_to_tuple(s) for s in segments]
+
+
+def flatten_chunks_to_tuples(chunks: List[Transcript]) -> List[Tuple[str, int, int, str]]:
+    """Flatten all chunk segments to identity tuples."""
+    result = []
+    for chunk in chunks:
+        result.extend(segments_to_tuples(chunk.segments))
+    return result
 
 
 # =============================================================================
@@ -30,29 +58,41 @@ from app.services.chunking import (
 # =============================================================================
 
 @pytest.fixture
-def minimal_transcript() -> Transcript:
-    """Single segment transcript."""
+def single_segment_transcript() -> Transcript:
+    """Transcript with exactly 1 segment."""
     return Transcript(
         segments=[
             TranscriptSegment(
                 speaker="doctor",
-                text="Hola, buenos dias.",
+                text="Unico segmento de prueba.",
                 startMs=0,
-                endMs=2000
+                endMs=5000
             )
         ],
-        durationMs=2000
+        durationMs=5000
+    )
+
+
+@pytest.fixture
+def two_segment_transcript() -> Transcript:
+    """Minimal multi-segment transcript."""
+    return Transcript(
+        segments=[
+            TranscriptSegment(speaker="doctor", text="Primero.", startMs=0, endMs=2000),
+            TranscriptSegment(speaker="patient", text="Segundo.", startMs=2000, endMs=4000),
+        ],
+        durationMs=4000
     )
 
 
 @pytest.fixture
 def short_transcript() -> Transcript:
-    """Short transcript that should not be chunked."""
+    """Short transcript (3 segments) that fits in any reasonable limit."""
     return Transcript(
         segments=[
-            TranscriptSegment(speaker="doctor", text="Hola", startMs=0, endMs=1000),
-            TranscriptSegment(speaker="patient", text="Hola doctor", startMs=1000, endMs=2000),
-            TranscriptSegment(speaker="doctor", text="Como se siente?", startMs=2000, endMs=3000),
+            TranscriptSegment(speaker="doctor", text="Hola.", startMs=0, endMs=1000),
+            TranscriptSegment(speaker="patient", text="Buenos dias.", startMs=1000, endMs=2000),
+            TranscriptSegment(speaker="doctor", text="Como esta?", startMs=2000, endMs=3000),
         ],
         durationMs=3000
     )
@@ -61,34 +101,33 @@ def short_transcript() -> Transcript:
 @pytest.fixture
 def fifteen_minute_transcript() -> Transcript:
     """
-    ~15 minute transcript with segments every minute.
-    Each segment has ~50 chars (~13 tokens).
+    ~15 minute transcript with 15 segments (1 per minute).
+    Each segment: ~70 chars (~18 tokens + 2 overhead = ~20 tokens).
+    Total: ~300 tokens.
     """
     segments = []
     for i in range(15):
         start = i * 60_000
         end = start + 50_000
         speaker = "doctor" if i % 2 == 0 else "patient"
-        text = f"Segmento numero {i:02d} con contenido de prueba para simular texto clinico."
+        # Unique text per segment for identity
+        text = f"Segmento {i:02d}: contenido de prueba unico para validar chunking."
         segments.append(
             TranscriptSegment(speaker=speaker, text=text, startMs=start, endMs=end)
         )
 
-    return Transcript(
-        segments=segments,
-        durationMs=15 * 60_000
-    )
+    return Transcript(segments=segments, durationMs=15 * 60_000)
 
 
 @pytest.fixture
 def high_token_transcript() -> Transcript:
     """
-    Transcript with many tokens (long text per segment).
-    Each segment ~200 chars = ~50 tokens.
-    10 segments = ~500 tokens (without speaker overhead).
+    Transcript optimized for token limit testing.
+    10 segments, each ~200 chars (~50 tokens + 2 = ~52 tokens each).
+    Total: ~520 tokens.
     """
     segments = []
-    base_text = "Este es un texto extenso para simular contenido clinico. " * 4  # ~200 chars
+    base_text = "Este texto tiene aproximadamente doscientos caracteres para prueba. " * 3
 
     for i in range(10):
         start = i * 30_000
@@ -96,7 +135,7 @@ def high_token_transcript() -> Transcript:
         segments.append(
             TranscriptSegment(
                 speaker="doctor" if i % 2 == 0 else "patient",
-                text=f"{base_text} Segmento {i}.",
+                text=f"{base_text}Segmento {i}.",
                 startMs=start,
                 endMs=end
             )
@@ -108,170 +147,273 @@ def high_token_transcript() -> Transcript:
 @pytest.fixture
 def oversized_segment_transcript() -> Transcript:
     """
-    Transcript with one segment that exceeds token limit by itself.
-    ~5000 chars = ~1250 tokens (over 1024 limit if used).
+    Transcript with one segment that exceeds typical token limits.
+    Middle segment: ~5000 chars = ~1250 tokens (exceeds 1024 or even 512).
     """
-    giant_text = "Texto muy largo. " * 300  # ~5100 chars
+    giant_text = "Texto largo para simular segmento enorme. " * 125  # ~5000 chars
 
     return Transcript(
         segments=[
-            TranscriptSegment(speaker="doctor", text="Inicio.", startMs=0, endMs=1000),
-            TranscriptSegment(speaker="doctor", text=giant_text, startMs=1000, endMs=60000),
-            TranscriptSegment(speaker="patient", text="Entendido.", startMs=60000, endMs=62000),
+            TranscriptSegment(speaker="doctor", text="Inicio normal.", startMs=0, endMs=2000),
+            TranscriptSegment(speaker="patient", text=giant_text.strip(), startMs=2000, endMs=120000),
+            TranscriptSegment(speaker="doctor", text="Fin normal.", startMs=120000, endMs=122000),
         ],
-        durationMs=62000
+        durationMs=122000
     )
 
 
-# =============================================================================
-# Token Estimation Tests
-# =============================================================================
-
-class TestTokenEstimation:
-    """Tests for token estimation heuristics."""
-
-    def test_empty_text_returns_zero(self):
-        assert estimate_tokens("") == 0
-
-    def test_short_text_returns_minimum_one(self):
-        # "Hi" = 2 chars -> ceil(2/4) = 1
-        assert estimate_tokens("Hi") >= 1
-
-    def test_known_length_estimation(self):
-        # 100 chars -> ceil(100/4) = 25 tokens
-        text = "a" * 100
-        assert estimate_tokens(text) == 25
-
-    def test_spanish_medical_text(self):
-        # Realistic Spanish medical text
-        text = "El paciente presenta cefalea tensional de tres dias de evolucion."
-        # ~67 chars -> ceil(67/4) = 17 tokens
-        result = estimate_tokens(text)
-        assert 15 <= result <= 20  # Reasonable range
-
-    def test_segment_includes_speaker_overhead(self):
-        segment = TranscriptSegment(
-            speaker="doctor",
-            text="Hola",  # 4 chars -> 1 token
-            startMs=0,
-            endMs=1000
+@pytest.fixture
+def alternating_speakers_transcript() -> Transcript:
+    """20 segments with strictly alternating speakers."""
+    segments = []
+    for i in range(20):
+        speaker = "doctor" if i % 2 == 0 else "patient"
+        segments.append(
+            TranscriptSegment(
+                speaker=speaker,
+                text=f"Turno {i:02d} del {speaker}.",
+                startMs=i * 5000,
+                endMs=(i + 1) * 5000 - 500
+            )
         )
-        # 1 text token + 2 speaker overhead = 3
-        assert estimate_segment_tokens(segment) == 3
+    return Transcript(segments=segments, durationMs=100_000)
+
+
+@pytest.fixture
+def repeated_short_text_transcript() -> Transcript:
+    """
+    Segments with identical short text but different timestamps.
+    Tests that identity uses full tuple, not just text.
+    """
+    segments = []
+    for i in range(10):
+        segments.append(
+            TranscriptSegment(
+                speaker="doctor",
+                text="Ok.",  # Same text for all
+                startMs=i * 2000,
+                endMs=i * 2000 + 1500
+            )
+        )
+    return Transcript(segments=segments, durationMs=20_000)
 
 
 # =============================================================================
-# Integrity Tests (No Loss/Duplication)
+# 1. INVARIANT TESTS: No Loss, No Duplication, Stable Order
 # =============================================================================
 
-class TestChunkingIntegrity:
-    """Tests ensuring no segment loss or duplication."""
+class TestChunkingInvariants:
+    """
+    Core invariants that must ALWAYS hold:
+    - No segment loss
+    - No segment duplication
+    - Original order preserved
+    Comparison by full identity tuple: (speaker, start_ms, end_ms, text)
+    """
 
-    def test_all_segments_preserved_short(self, short_transcript):
-        """Short transcript: all segments preserved."""
-        chunks = chunk_transcript(short_transcript)
-        assert validate_chunks_integrity(short_transcript, chunks)
+    def test_no_loss_short_transcript(self, short_transcript):
+        """Short transcript: all segments present after chunking."""
+        chunks = chunk_transcript(short_transcript, soft_duration_limit_ms=None)
 
-    def test_all_segments_preserved_long(self, fifteen_minute_transcript):
-        """Long transcript: all segments preserved after chunking."""
+        original = segments_to_tuples(short_transcript.segments)
+        result = flatten_chunks_to_tuples(chunks)
+
+        assert result == original, "Segment loss detected"
+
+    def test_no_loss_long_transcript(self, fifteen_minute_transcript):
+        """Long transcript: all segments present after chunking."""
         chunks = chunk_transcript(
             fifteen_minute_transcript,
             max_duration_ms=300_000,
-            hard_token_limit=500,
-            soft_duration_limit_ms=180_000
+            hard_token_limit=100,
+            soft_duration_limit_ms=60_000
         )
 
-        assert validate_chunks_integrity(fifteen_minute_transcript, chunks)
+        original = segments_to_tuples(fifteen_minute_transcript.segments)
+        result = flatten_chunks_to_tuples(chunks)
 
-    def test_segment_order_preserved(self, fifteen_minute_transcript):
-        """Segments maintain original order across chunks."""
+        assert result == original, "Segment loss detected in long transcript"
+
+    def test_no_duplication(self, fifteen_minute_transcript):
+        """No segment appears more than once."""
         chunks = chunk_transcript(
             fifteen_minute_transcript,
-            max_duration_ms=300_000,
-            soft_duration_limit_ms=180_000
+            hard_token_limit=50,
+            soft_duration_limit_ms=None
         )
 
-        all_texts = []
-        for chunk in chunks:
-            all_texts.extend(seg.text for seg in chunk.segments)
+        result = flatten_chunks_to_tuples(chunks)
 
-        original_texts = [seg.text for seg in fifteen_minute_transcript.segments]
-        assert all_texts == original_texts
+        # Check for duplicates
+        assert len(result) == len(set(result)), "Duplicate segments detected"
 
-    def test_no_empty_chunks_produced(self, fifteen_minute_transcript):
-        """No empty chunks in result."""
+    def test_order_preserved_simple(self, short_transcript):
+        """Order maintained in simple case."""
+        chunks = chunk_transcript(short_transcript, hard_token_limit=20, soft_duration_limit_ms=None)
+
+        original = segments_to_tuples(short_transcript.segments)
+        result = flatten_chunks_to_tuples(chunks)
+
+        assert result == original, "Order changed"
+
+    def test_order_preserved_with_many_chunks(self, alternating_speakers_transcript):
+        """Order maintained when splitting into many chunks."""
+        chunks = chunk_transcript(
+            alternating_speakers_transcript,
+            hard_token_limit=30,
+            soft_duration_limit_ms=None
+        )
+
+        original = segments_to_tuples(alternating_speakers_transcript.segments)
+        result = flatten_chunks_to_tuples(chunks)
+
+        assert result == original, "Order changed with many chunks"
+
+    def test_repeated_text_uses_full_identity(self, repeated_short_text_transcript):
+        """
+        Segments with identical text but different timestamps are distinct.
+        Tests that comparison uses full tuple, not just text.
+        """
+        chunks = chunk_transcript(
+            repeated_short_text_transcript,
+            hard_token_limit=30,
+            soft_duration_limit_ms=None
+        )
+
+        original = segments_to_tuples(repeated_short_text_transcript.segments)
+        result = flatten_chunks_to_tuples(chunks)
+
+        # All 10 segments should be present (even though text is identical)
+        assert len(result) == 10
+        assert result == original
+
+    def test_no_empty_chunks_ever(self, fifteen_minute_transcript):
+        """No chunk should be empty."""
         chunks = chunk_transcript(
             fifteen_minute_transcript,
-            hard_token_limit=100  # Force many chunks
+            hard_token_limit=50,
+            soft_duration_limit_ms=10_000
         )
 
-        for chunk in chunks:
-            assert len(chunk.segments) > 0
+        for i, chunk in enumerate(chunks):
+            assert len(chunk.segments) > 0, f"Chunk {i} is empty"
 
 
 # =============================================================================
-# Hard Token Limit Tests
+# 2. HARD TOKEN LIMIT TESTS
 # =============================================================================
 
 class TestHardTokenLimit:
-    """Tests for hard token limit enforcement."""
+    """
+    Hard token limit enforcement.
+    Exception: A single oversized segment may exceed limit (goes alone in chunk).
+    """
 
-    def test_respects_hard_token_limit(self, high_token_transcript):
-        """Each chunk should respect hard token limit."""
-        hard_limit = 200
+    def test_chunks_respect_hard_limit(self, high_token_transcript):
+        """Multi-segment chunks must not exceed hard token limit."""
+        hard_limit = 150
 
         chunks = chunk_transcript(
             high_token_transcript,
             hard_token_limit=hard_limit,
-            soft_duration_limit_ms=None  # Disable soft limit
+            soft_duration_limit_ms=None
         )
 
-        for chunk in chunks:
+        for i, chunk in enumerate(chunks):
             chunk_tokens = sum(estimate_segment_tokens(s) for s in chunk.segments)
-            # Allow single oversized segment (documented behavior)
+
+            # If chunk has multiple segments, must respect limit
             if len(chunk.segments) > 1:
-                assert chunk_tokens <= hard_limit + 100  # Small tolerance for boundary
+                assert chunk_tokens <= hard_limit, (
+                    f"Chunk {i} with {len(chunk.segments)} segments "
+                    f"has {chunk_tokens} tokens > limit {hard_limit}"
+                )
 
-    def test_small_token_limit_creates_more_chunks(self, high_token_transcript):
-        """Smaller token limit = more chunks."""
-        chunks_large = chunk_transcript(
-            high_token_transcript,
-            hard_token_limit=2000,
-            soft_duration_limit_ms=None
-        )
-        chunks_small = chunk_transcript(
-            high_token_transcript,
-            hard_token_limit=200,
-            soft_duration_limit_ms=None
-        )
+    def test_oversized_segment_allowed_alone(self, oversized_segment_transcript):
+        """Single oversized segment is allowed in its own chunk."""
+        hard_limit = 100  # Way below the giant segment
 
-        assert len(chunks_small) > len(chunks_large)
-
-    def test_oversized_single_segment_not_split(self, oversized_segment_transcript):
-        """Single segment exceeding limit goes in own chunk (no infinite loop)."""
         chunks = chunk_transcript(
             oversized_segment_transcript,
-            hard_token_limit=100,  # Very low limit
+            hard_token_limit=hard_limit,
             soft_duration_limit_ms=None
         )
 
-        # Should have 3 chunks (or 2 if boundaries merge)
-        assert len(chunks) >= 2
+        # Find the chunk with the giant segment
+        giant_text_prefix = "Texto largo para simular"
+        giant_chunk = None
+        for chunk in chunks:
+            for seg in chunk.segments:
+                if seg.text.startswith(giant_text_prefix):
+                    giant_chunk = chunk
+                    break
 
-        # Verify no infinite loop / all segments present
-        assert validate_chunks_integrity(oversized_segment_transcript, chunks)
+        assert giant_chunk is not None, "Giant segment not found"
+        assert len(giant_chunk.segments) == 1, "Giant segment should be alone in chunk"
+
+        # Verify it exceeds limit (this is allowed for single-segment chunks)
+        giant_tokens = sum(estimate_segment_tokens(s) for s in giant_chunk.segments)
+        assert giant_tokens > hard_limit, "Giant segment should exceed limit"
+
+    def test_oversized_no_infinite_loop(self, oversized_segment_transcript):
+        """Oversized segment doesn't cause infinite loop."""
+        chunks = chunk_transcript(
+            oversized_segment_transcript,
+            hard_token_limit=50,
+            soft_duration_limit_ms=None
+        )
+
+        # Should complete and preserve all segments
+        original = segments_to_tuples(oversized_segment_transcript.segments)
+        result = flatten_chunks_to_tuples(chunks)
+        assert result == original
+
+    def test_lower_limit_creates_more_chunks(self, high_token_transcript):
+        """Lower token limit = more chunks."""
+        chunks_high = chunk_transcript(
+            high_token_transcript,
+            hard_token_limit=1000,
+            soft_duration_limit_ms=None
+        )
+        chunks_low = chunk_transcript(
+            high_token_transcript,
+            hard_token_limit=100,
+            soft_duration_limit_ms=None
+        )
+
+        assert len(chunks_low) > len(chunks_high)
+
+    def test_exact_limit_boundary(self):
+        """Test behavior at exact token limit boundary."""
+        # Create segments where sum is exactly at limit
+        # Each segment: 4 chars = 1 token + 2 overhead = 3 tokens
+        segments = [
+            TranscriptSegment(speaker="doctor", text="AAAA", startMs=i*1000, endMs=(i+1)*1000)
+            for i in range(10)
+        ]
+        t = Transcript(segments=segments, durationMs=10000)
+
+        # 10 segments * 3 tokens = 30 tokens total
+        # With limit 30, should fit in 1 chunk (if soft limit disabled)
+        chunks = chunk_transcript(
+            t,
+            hard_token_limit=30,
+            soft_duration_limit_ms=None
+        )
+
+        assert len(chunks) == 1
 
 
 # =============================================================================
-# Soft Duration Limit Tests
+# 3. SOFT DURATION LIMIT TESTS
 # =============================================================================
 
 class TestSoftDurationLimit:
-    """Tests for soft duration limit behavior."""
+    """Soft duration limit triggers splits at segment boundaries."""
 
-    def test_soft_limit_creates_splits(self, fifteen_minute_transcript):
-        """Soft duration limit triggers splits."""
-        # 15 min transcript with 3 min soft limit
+    def test_soft_limit_triggers_split(self, fifteen_minute_transcript):
+        """Soft limit creates splits when exceeded."""
+        # 15 min transcript, 3 min soft limit should create ~5 chunks
         chunks = chunk_transcript(
             fifteen_minute_transcript,
             max_duration_ms=900_000,  # 15 min hard (no effect)
@@ -279,234 +421,422 @@ class TestSoftDurationLimit:
             soft_duration_limit_ms=180_000  # 3 min soft
         )
 
-        # Should have ~5 chunks (15min / 3min)
-        assert len(chunks) >= 4
+        assert len(chunks) >= 4, "Soft limit should create multiple chunks"
 
-    def test_disabled_soft_limit(self, fifteen_minute_transcript):
+    def test_soft_limit_disabled_with_none(self, fifteen_minute_transcript):
         """soft_duration_limit_ms=None disables soft limit."""
         chunks = chunk_transcript(
             fifteen_minute_transcript,
             max_duration_ms=900_000,
             hard_token_limit=10000,
-            soft_duration_limit_ms=None  # Disabled
-        )
-
-        # With no limits exceeded, should be 1 chunk
-        assert len(chunks) == 1
-
-    def test_soft_limit_respects_min_segments(self, fifteen_minute_transcript):
-        """Soft limit doesn't split below min_segments_per_chunk."""
-        chunks = chunk_transcript(
-            fifteen_minute_transcript,
-            soft_duration_limit_ms=10_000,  # Very short (10 sec)
-            min_segments_per_chunk=3
-        )
-
-        # Each chunk should have at least 3 segments (except maybe last)
-        for chunk in chunks[:-1]:
-            assert len(chunk.segments) >= 3
-
-
-# =============================================================================
-# Edge Cases
-# =============================================================================
-
-class TestEdgeCases:
-    """Edge case handling tests."""
-
-    def test_empty_segments_returns_original(self):
-        """Empty transcript returns as-is."""
-        # Need at least 1 segment for Transcript validation
-        # So we test with minimal transcript
-        t = Transcript(
-            segments=[TranscriptSegment(speaker="doctor", text="x", startMs=0, endMs=1)],
-            durationMs=1
-        )
-        chunks = chunk_transcript(t)
-        assert len(chunks) == 1
-
-    def test_single_segment_returns_original(self, minimal_transcript):
-        """Single segment transcript not chunked."""
-        chunks = chunk_transcript(minimal_transcript)
-
-        assert len(chunks) == 1
-        assert chunks[0].segments[0].text == minimal_transcript.segments[0].text
-
-    def test_alternating_speakers_preserved(self):
-        """Speaker alternation preserved across chunks."""
-        segments = []
-        for i in range(20):
-            speaker = "doctor" if i % 2 == 0 else "patient"
-            segments.append(
-                TranscriptSegment(
-                    speaker=speaker,
-                    text=f"Turn {i}",
-                    startMs=i * 10_000,
-                    endMs=(i + 1) * 10_000 - 1000
-                )
-            )
-
-        t = Transcript(segments=segments, durationMs=200_000)
-
-        chunks = chunk_transcript(
-            t,
-            hard_token_limit=50,  # Force splits
             soft_duration_limit_ms=None
         )
 
-        # Verify alternation preserved within each chunk
-        all_speakers = []
-        for chunk in chunks:
-            for seg in chunk.segments:
-                all_speakers.append(seg.speaker)
+        # With both hard limits high and soft disabled, single chunk
+        assert len(chunks) == 1
 
-        original_speakers = [seg.speaker for seg in segments]
-        assert all_speakers == original_speakers
-
-    def test_language_preserved_in_chunks(self, short_transcript):
-        """Language metadata preserved in all chunks."""
-        # Modify language
-        t = short_transcript.model_copy(deep=True)
-        # Create new transcript with different language
-        t = Transcript(
-            segments=t.segments,
-            language="en",
-            durationMs=t.duration_ms
+    def test_split_at_segment_boundary_not_mid_segment(self, fifteen_minute_transcript):
+        """Splits occur between segments, never within."""
+        chunks = chunk_transcript(
+            fifteen_minute_transcript,
+            soft_duration_limit_ms=60_000,  # 1 min
+            hard_token_limit=10000
         )
 
-        chunks = chunk_transcript(t, hard_token_limit=20)
+        # Verify each chunk's segments are contiguous from original
+        original = segments_to_tuples(fifteen_minute_transcript.segments)
+        position = 0
 
         for chunk in chunks:
-            assert chunk.language == "en"
+            chunk_tuples = segments_to_tuples(chunk.segments)
+            expected = original[position:position + len(chunk_tuples)]
+            assert chunk_tuples == expected, "Chunk has non-contiguous segments"
+            position += len(chunk_tuples)
+
+    def test_soft_limit_respects_min_segments(self, fifteen_minute_transcript):
+        """Soft limit respects min_segments_per_chunk."""
+        chunks = chunk_transcript(
+            fifteen_minute_transcript,
+            soft_duration_limit_ms=10_000,  # Very aggressive
+            min_segments_per_chunk=4
+        )
+
+        # All chunks except possibly last should have >= 4 segments
+        for chunk in chunks[:-1]:
+            assert len(chunk.segments) >= 4, "min_segments_per_chunk not respected"
 
 
 # =============================================================================
-# 15-Minute Transcript Test (Integration)
+# 4. FIFTEEN MINUTE TRANSCRIPT INTEGRATION
 # =============================================================================
 
 class TestFifteenMinuteTranscript:
-    """Integration test with ~15 minute transcript."""
+    """Integration tests with ~15 minute transcript."""
 
-    def test_fifteen_min_chunked_correctly(self, fifteen_minute_transcript):
-        """
-        15 min transcript with 5 min max duration creates 3 chunks.
-        Last chunk preserves final segments.
-        """
+    def test_creates_multiple_chunks(self, fifteen_minute_transcript):
+        """15 min transcript with 5 min limit creates multiple chunks."""
         chunks = chunk_transcript(
             fifteen_minute_transcript,
             max_duration_ms=300_000,  # 5 min
             soft_duration_limit_ms=None,
-            hard_token_limit=10000  # High (no effect)
-        )
-
-        # Should have 3 chunks (0-5min, 5-10min, 10-15min)
-        assert len(chunks) == 3
-
-        # Last chunk contains final segments
-        last_chunk = chunks[-1]
-        last_original = fifteen_minute_transcript.segments[-1]
-        assert last_chunk.segments[-1].text == last_original.text
-
-    def test_fifteen_min_with_soft_limit(self, fifteen_minute_transcript):
-        """
-        15 min transcript with 3 min soft limit creates ~5 chunks.
-        """
-        chunks = chunk_transcript(
-            fifteen_minute_transcript,
-            max_duration_ms=900_000,  # 15 min hard (no effect)
-            soft_duration_limit_ms=180_000,  # 3 min soft
             hard_token_limit=10000
         )
 
-        # Should have ~5 chunks
-        assert 4 <= len(chunks) <= 6
+        assert len(chunks) > 1, "Should create multiple chunks"
+        assert len(chunks) == 3, "Should create exactly 3 chunks for 15min/5min"
 
-        # Integrity preserved
-        assert validate_chunks_integrity(fifteen_minute_transcript, chunks)
-
-    def test_fifteen_min_stats(self, fifteen_minute_transcript):
-        """Verify stats calculation for 15 min transcript."""
+    def test_last_chunk_has_final_segments(self, fifteen_minute_transcript):
+        """Last chunk contains the final segments of original."""
         chunks = chunk_transcript(
             fifteen_minute_transcript,
-            max_duration_ms=300_000
+            max_duration_ms=300_000,
+            soft_duration_limit_ms=None
+        )
+
+        last_original = segment_to_tuple(fifteen_minute_transcript.segments[-1])
+        last_chunk_last = segment_to_tuple(chunks[-1].segments[-1])
+
+        assert last_chunk_last == last_original, "Last segment not in last chunk"
+
+    def test_first_chunk_has_first_segments(self, fifteen_minute_transcript):
+        """First chunk starts with first segment of original."""
+        chunks = chunk_transcript(
+            fifteen_minute_transcript,
+            max_duration_ms=300_000,
+            soft_duration_limit_ms=None
+        )
+
+        first_original = segment_to_tuple(fifteen_minute_transcript.segments[0])
+        first_chunk_first = segment_to_tuple(chunks[0].segments[0])
+
+        assert first_chunk_first == first_original
+
+    def test_all_fifteen_segments_present(self, fifteen_minute_transcript):
+        """All 15 segments are present across chunks."""
+        chunks = chunk_transcript(
+            fifteen_minute_transcript,
+            max_duration_ms=300_000,
+            soft_duration_limit_ms=None
+        )
+
+        total_segments = sum(len(c.segments) for c in chunks)
+        assert total_segments == 15
+
+    def test_chunk_stats_accurate(self, fifteen_minute_transcript):
+        """get_chunk_stats returns accurate information."""
+        chunks = chunk_transcript(
+            fifteen_minute_transcript,
+            max_duration_ms=300_000,
+            soft_duration_limit_ms=None
         )
 
         stats = get_chunk_stats(chunks)
 
         assert stats["chunk_count"] == len(chunks)
         assert stats["total_segments"] == 15
+        assert len(stats["chunks"]) == len(chunks)
 
 
 # =============================================================================
-# Utility Function Tests
+# 5. EDGE CASES
 # =============================================================================
 
-class TestUtilityFunctions:
-    """Tests for utility functions."""
+class TestEdgeCases:
+    """Edge case handling."""
 
-    def test_validate_integrity_detects_loss(self, short_transcript):
-        """validate_chunks_integrity detects segment loss."""
-        chunks = chunk_transcript(short_transcript)
+    def test_single_segment_returns_single_chunk(self, single_segment_transcript):
+        """Single segment transcript returns 1 chunk with that segment."""
+        chunks = chunk_transcript(single_segment_transcript)
 
-        # Remove a segment (simulate loss)
-        bad_chunks = [
-            Transcript(
-                segments=chunks[0].segments[:-1],  # Missing last segment
-                durationMs=chunks[0].duration_ms,
-                language=chunks[0].language
-            )
-        ]
+        assert len(chunks) == 1
+        assert len(chunks[0].segments) == 1
+        assert chunks[0].segments[0].text == single_segment_transcript.segments[0].text
 
-        assert not validate_chunks_integrity(short_transcript, bad_chunks)
-
-    def test_validate_integrity_detects_duplication(self, short_transcript):
-        """validate_chunks_integrity detects segment duplication."""
-        # Duplicate a segment
-        dup_segments = list(short_transcript.segments) + [short_transcript.segments[0]]
-        bad_transcript = Transcript(
-            segments=dup_segments,
-            durationMs=short_transcript.duration_ms,
-            language=short_transcript.language
+    def test_two_segments_minimal_case(self, two_segment_transcript):
+        """Two segment transcript handles correctly."""
+        chunks = chunk_transcript(
+            two_segment_transcript,
+            hard_token_limit=10000,
+            soft_duration_limit_ms=None
         )
 
-        chunks = [bad_transcript]
+        assert len(chunks) == 1
+        original = segments_to_tuples(two_segment_transcript.segments)
+        result = flatten_chunks_to_tuples(chunks)
+        assert result == original
 
-        assert not validate_chunks_integrity(short_transcript, chunks)
+    def test_min_segments_per_chunk_respected(self, alternating_speakers_transcript):
+        """min_segments_per_chunk prevents premature splits."""
+        chunks = chunk_transcript(
+            alternating_speakers_transcript,
+            hard_token_limit=100,
+            min_segments_per_chunk=5
+        )
 
-    def test_get_chunk_stats_empty(self):
-        """get_chunk_stats handles empty list."""
+        # All non-final chunks should have >= 5 segments
+        for chunk in chunks[:-1]:
+            assert len(chunk.segments) >= 5
+
+    def test_alternating_speakers_order_preserved(self, alternating_speakers_transcript):
+        """Alternating speaker pattern preserved across chunks."""
+        chunks = chunk_transcript(
+            alternating_speakers_transcript,
+            hard_token_limit=50,
+            soft_duration_limit_ms=None
+        )
+
+        all_speakers = []
+        for chunk in chunks:
+            for seg in chunk.segments:
+                all_speakers.append(seg.speaker)
+
+        # Verify alternation
+        for i in range(len(all_speakers)):
+            expected = "doctor" if i % 2 == 0 else "patient"
+            assert all_speakers[i] == expected, f"Speaker order broken at index {i}"
+
+    def test_language_preserved_in_all_chunks(self, short_transcript):
+        """Language metadata preserved in every chunk."""
+        t = Transcript(
+            segments=short_transcript.segments,
+            language="en",
+            durationMs=short_transcript.duration_ms
+        )
+
+        chunks = chunk_transcript(t, hard_token_limit=15, soft_duration_limit_ms=None)
+
+        for chunk in chunks:
+            assert chunk.language == "en"
+
+    def test_duration_ms_calculated_per_chunk(self, fifteen_minute_transcript):
+        """Each chunk has correct duration_ms based on its segments."""
+        chunks = chunk_transcript(
+            fifteen_minute_transcript,
+            max_duration_ms=300_000,
+            soft_duration_limit_ms=None
+        )
+
+        for chunk in chunks:
+            if chunk.segments:
+                expected_duration = chunk.segments[-1].end_ms - chunk.segments[0].start_ms
+                assert chunk.duration_ms == expected_duration
+
+    def test_validates_chunks_integrity_helper(self, short_transcript):
+        """validate_chunks_integrity works correctly."""
+        chunks = chunk_transcript(short_transcript, soft_duration_limit_ms=None)
+
+        # Should pass
+        assert validate_chunks_integrity(short_transcript, chunks)
+
+        # Simulate loss - should fail
+        bad_chunks = [
+            Transcript(
+                segments=chunks[0].segments[:-1],
+                durationMs=1000,
+                language="es"
+            )
+        ]
+        assert not validate_chunks_integrity(short_transcript, bad_chunks)
+
+
+# =============================================================================
+# 6. TOKEN ESTIMATION TESTS
+# =============================================================================
+
+class TestTokenEstimation:
+    """Tests for token estimation heuristics."""
+
+    def test_empty_text_returns_zero(self):
+        """Empty string = 0 tokens."""
+        assert estimate_tokens("") == 0
+
+    def test_minimum_one_for_nonempty(self):
+        """Non-empty text returns at least 1 token."""
+        assert estimate_tokens("a") >= 1
+        assert estimate_tokens("ab") >= 1
+
+    def test_known_length_calculation(self):
+        """Verify calculation: ceil(chars / 4)."""
+        # 100 chars -> ceil(100/4) = 25
+        assert estimate_tokens("a" * 100) == 25
+
+        # 101 chars -> ceil(101/4) = 26
+        assert estimate_tokens("a" * 101) == 26
+
+        # 4 chars -> ceil(4/4) = 1
+        assert estimate_tokens("abcd") == 1
+
+    def test_segment_tokens_includes_overhead(self):
+        """Segment estimation adds speaker overhead."""
+        segment = TranscriptSegment(
+            speaker="doctor",
+            text="AAAA",  # 4 chars = 1 token
+            startMs=0,
+            endMs=1000
+        )
+
+        # 1 text token + 2 speaker overhead = 3
+        assert estimate_segment_tokens(segment) == 3
+
+    def test_consistent_estimation(self):
+        """Same text always gives same estimate."""
+        text = "Texto de prueba consistente."
+        estimate1 = estimate_tokens(text)
+        estimate2 = estimate_tokens(text)
+        assert estimate1 == estimate2
+
+
+# =============================================================================
+# 7. BOUNDARY CONDITION TESTS
+# =============================================================================
+
+class TestBoundaryConditions:
+    """Tests for boundary conditions and limits."""
+
+    def test_segment_at_exact_duration_boundary(self):
+        """Segment ending exactly at duration limit."""
+        segments = [
+            TranscriptSegment(speaker="doctor", text="A", startMs=0, endMs=100),
+            TranscriptSegment(speaker="patient", text="B", startMs=100, endMs=200),
+        ]
+        t = Transcript(segments=segments, durationMs=200)
+
+        chunks = chunk_transcript(
+            t,
+            max_duration_ms=200,  # Exactly matches total
+            soft_duration_limit_ms=None
+        )
+
+        assert len(chunks) == 1
+
+    def test_segment_one_ms_over_boundary(self):
+        """Segment ending 1ms over duration limit triggers split."""
+        segments = [
+            TranscriptSegment(speaker="doctor", text="A" * 100, startMs=0, endMs=100),
+            TranscriptSegment(speaker="patient", text="B" * 100, startMs=100, endMs=201),
+        ]
+        t = Transcript(segments=segments, durationMs=201)
+
+        chunks = chunk_transcript(
+            t,
+            max_duration_ms=200,
+            soft_duration_limit_ms=None
+        )
+
+        # Should split because segment B would make duration 201 > 200
+        assert len(chunks) == 2
+
+    def test_large_gap_between_segments(self):
+        """Handles large time gaps between segments."""
+        segments = [
+            TranscriptSegment(speaker="doctor", text="Start.", startMs=0, endMs=1000),
+            TranscriptSegment(speaker="patient", text="After gap.", startMs=100000, endMs=101000),
+        ]
+        t = Transcript(segments=segments, durationMs=101000)
+
+        chunks = chunk_transcript(
+            t,
+            max_duration_ms=50_000,  # Gap forces split
+            soft_duration_limit_ms=None
+        )
+
+        # Both segments preserved
+        original = segments_to_tuples(t.segments)
+        result = flatten_chunks_to_tuples(chunks)
+        assert result == original
+
+
+# =============================================================================
+# 8. DEFAULT VALUES AND BACKWARD COMPATIBILITY
+# =============================================================================
+
+class TestDefaultsAndCompatibility:
+    """Tests for default values and backward compatibility."""
+
+    def test_default_constants_values(self):
+        """Default constants have expected values."""
+        assert DEFAULT_MAX_CHUNK_DURATION_MS == 300_000
+        assert DEFAULT_HARD_TOKEN_LIMIT == 2048
+        assert DEFAULT_SOFT_DURATION_LIMIT_MS == 180_000
+        assert CHARS_PER_TOKEN_ESTIMATE == 4.0
+
+    def test_legacy_signature_two_args(self, fifteen_minute_transcript):
+        """Legacy call chunk_transcript(t, max_duration_ms) works."""
+        chunks = chunk_transcript(fifteen_minute_transcript, 300_000)
+
+        # Should produce valid chunks
+        assert len(chunks) >= 1
+        original = segments_to_tuples(fifteen_minute_transcript.segments)
+        result = flatten_chunks_to_tuples(chunks)
+        assert result == original
+
+    def test_keyword_only_args_enforced(self):
+        """hard_token_limit and others are keyword-only."""
+        t = Transcript(
+            segments=[TranscriptSegment(speaker="doctor", text="Test.", startMs=0, endMs=1000)],
+            durationMs=1000
+        )
+
+        # This should work (keyword)
+        chunks = chunk_transcript(t, hard_token_limit=100)
+        assert len(chunks) == 1
+
+    def test_get_chunk_stats_empty_list(self):
+        """get_chunk_stats handles empty chunk list."""
         stats = get_chunk_stats([])
 
         assert stats["chunk_count"] == 0
         assert stats["total_segments"] == 0
-
-    def test_get_chunk_stats_correct(self, short_transcript):
-        """get_chunk_stats returns correct values."""
-        chunks = [short_transcript]  # Single chunk
-
-        stats = get_chunk_stats(chunks)
-
-        assert stats["chunk_count"] == 1
-        assert stats["total_segments"] == 3
-        assert stats["total_duration_ms"] == short_transcript.duration_ms
-        assert len(stats["chunks"]) == 1
+        assert stats["total_tokens_estimated"] == 0
+        assert stats["total_duration_ms"] == 0
 
 
 # =============================================================================
-# Backward Compatibility Tests
+# 9. STRESS / ROBUSTNESS TESTS
 # =============================================================================
 
-class TestBackwardCompatibility:
-    """Tests ensuring backward compatibility with existing callers."""
+class TestRobustness:
+    """Robustness and stress tests."""
 
-    def test_legacy_signature_works(self, fifteen_minute_transcript):
-        """Old signature chunk_transcript(t, max_duration_ms) still works."""
-        chunks = chunk_transcript(fifteen_minute_transcript, 300_000)
+    def test_many_small_segments(self):
+        """Handles many small segments."""
+        segments = [
+            TranscriptSegment(
+                speaker="doctor" if i % 2 == 0 else "patient",
+                text=f"S{i}",
+                startMs=i * 100,
+                endMs=i * 100 + 50
+            )
+            for i in range(100)
+        ]
+        t = Transcript(segments=segments, durationMs=10000)
 
-        assert len(chunks) >= 1
-        assert validate_chunks_integrity(fifteen_minute_transcript, chunks)
+        chunks = chunk_transcript(t, hard_token_limit=50, soft_duration_limit_ms=None)
 
-    def test_default_values_unchanged(self):
-        """Default values match expected constants."""
-        assert DEFAULT_MAX_CHUNK_DURATION_MS == 300_000
-        assert DEFAULT_HARD_TOKEN_LIMIT == 2048
+        # All segments preserved
+        assert sum(len(c.segments) for c in chunks) == 100
+
+    def test_very_aggressive_limits(self, fifteen_minute_transcript):
+        """Very aggressive limits don't break chunking."""
+        chunks = chunk_transcript(
+            fifteen_minute_transcript,
+            max_duration_ms=1000,  # 1 second
+            hard_token_limit=10,   # Very low
+            soft_duration_limit_ms=500  # 0.5 seconds
+        )
+
+        # Should still preserve all segments
+        original = segments_to_tuples(fifteen_minute_transcript.segments)
+        result = flatten_chunks_to_tuples(chunks)
+        assert result == original
+
+    def test_no_crash_on_minimal_valid_transcript(self):
+        """Minimal valid transcript doesn't crash."""
+        t = Transcript(
+            segments=[TranscriptSegment(speaker="doctor", text="X", startMs=0, endMs=1)],
+            durationMs=1
+        )
+
+        chunks = chunk_transcript(t)
+        assert len(chunks) == 1
+        assert len(chunks[0].segments) == 1

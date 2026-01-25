@@ -102,6 +102,40 @@ class Settings(BaseSettings):
         description="Cooldown in seconds between drift telemetry events (0 = no cooldown)"
     )
 
+    # Intelligent Chunking configuration
+    chunking_enabled: bool = Field(
+        default=False,
+        description=(
+            "Enable intelligent chunking with token limits. "
+            "False = use basic duration-only chunking (legacy). "
+            "True = use token + duration limits (recommended for long transcripts)."
+        )
+    )
+    chunking_hard_token_limit: int = Field(
+        default=2048,
+        ge=256,
+        le=32768,
+        description="Maximum estimated tokens per chunk (hard limit)"
+    )
+    chunking_soft_duration_limit_ms: Optional[int] = Field(
+        default=180000,
+        ge=0,
+        le=1800000,
+        description="Soft duration target in ms (triggers split when exceeded). None to disable."
+    )
+    chunking_max_duration_ms: int = Field(
+        default=300000,
+        ge=60000,
+        le=1800000,
+        description="Maximum duration per chunk in ms (hard limit)"
+    )
+    chunking_min_segments_per_chunk: int = Field(
+        default=1,
+        ge=1,
+        le=100,
+        description="Minimum segments per chunk before allowing split"
+    )
+
     @field_validator("firebase_credentials_json", mode="before")
     @classmethod
     def validate_credentials_json(cls, v: Optional[str]) -> Optional[str]:

@@ -241,12 +241,71 @@ async def _run_pipeline_logic(
     cleaned_transcript = clean_transcript(normalized_transcript)
     current_t = mark_stage("clean", current_t)
 
-    # 3. Chunk
-    from app.services.chunking import chunk_transcript, DEFAULT_MAX_CHUNK_DURATION_MS
-    
-    # Use real chunking logic
-    chunks = chunk_transcript(cleaned_transcript, DEFAULT_MAX_CHUNK_DURATION_MS)
+    # 3. Chunk (Intelligent or Legacy based on config)
+    from app.services.chunking import (
+        chunk_transcript,
+        estimate_segment_tokens,
+        DEFAULT_MAX_CHUNK_DURATION_MS
+    )
+
+    # Determine chunking mode from config
+    chunking_enabled = settings.chunking_enabled
+
+    if chunking_enabled:
+        # Intelligent chunking with token + duration limits
+        chunks = chunk_transcript(
+            cleaned_transcript,
+            max_duration_ms=settings.chunking_max_duration_ms,
+            hard_token_limit=settings.chunking_hard_token_limit,
+            soft_duration_limit_ms=settings.chunking_soft_duration_limit_ms,
+            min_segments_per_chunk=settings.chunking_min_segments_per_chunk,
+        )
+
+        # Calculate PHI-safe metrics for telemetry
+        total_tokens_est = sum(
+            estimate_segment_tokens(seg)
+            for seg in cleaned_transcript.segments
+        )
+        total_duration_ms = (
+            cleaned_transcript.segments[-1].end_ms - cleaned_transcript.segments[0].start_ms
+            if cleaned_transcript.segments else 0
+        )
+
+        # Emit chunking telemetry (PHI-safe: no text/segments)
+        try:
+            from app.services.telemetry import emit_event
+
+            chunking_payload = {
+                "numChunks": len(chunks),
+                "totalTokensEst": total_tokens_est,
+                "hardTokenLimit": settings.chunking_hard_token_limit,
+                "softDurationLimitMs": settings.chunking_soft_duration_limit_ms,
+                "maxDurationMs": settings.chunking_max_duration_ms,
+                "totalDurationMs": total_duration_ms,
+                "minSegmentsPerChunk": settings.chunking_min_segments_per_chunk,
+                "totalSegments": len(cleaned_transcript.segments),
+            }
+
+            # Only emit if chunking actually occurred (more than 1 chunk)
+            if len(chunks) > 1:
+                emit_event(
+                    name="chunking_applied",
+                    payload=chunking_payload,
+                    cooldown_s=0  # No cooldown for chunking events
+                )
+        except Exception as e:
+            # Telemetry failure should never break pipeline
+            logger.warning("Chunking telemetry emit failed", error=str(e))
+    else:
+        # Legacy chunking: duration-only (backward compatible)
+        chunks = chunk_transcript(
+            cleaned_transcript,
+            max_duration_ms=DEFAULT_MAX_CHUNK_DURATION_MS,
+            soft_duration_limit_ms=None  # Disable soft limit for legacy
+        )
+
     metrics["chunksCount"] = len(chunks)
+    metrics["chunkingEnabled"] = chunking_enabled
     current_t = mark_stage("chunk", current_t)
 
     # 4. Map (Extract per chunk)
