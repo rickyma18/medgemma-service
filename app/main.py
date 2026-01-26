@@ -3,6 +3,7 @@ MedGemma Service - FastAPI Application Entry Point.
 
 PHI-Safe medical transcription extraction service.
 """
+import asyncio
 import time
 import uuid
 from contextlib import asynccontextmanager
