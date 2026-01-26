@@ -166,6 +166,19 @@ class Settings(BaseSettings):
         description="Maximum evidence snippets to extract per chunk"
     )
 
+    # Epic 18: Job Queue configuration
+    job_queue_daily_quota: int = Field(
+        default=5,
+        ge=1,
+        le=100,
+        description="Daily job quota per user"
+    )
+
+    admin_api_key: Optional[str] = Field(
+        default=None,
+        description="Optional API key for admin endpoints (X-Admin-Token)"
+    )
+
     @field_validator("firebase_credentials_json", mode="before")
     @classmethod
     def validate_credentials_json(cls, v: Optional[str]) -> Optional[str]:

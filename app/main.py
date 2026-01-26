@@ -19,6 +19,10 @@ from app.core.config import get_settings
 from app.core.logging import get_safe_logger, setup_logging
 from app.schemas.response import ErrorDetail, ErrorResponse, ResponseMetadata
 from app.services.extractor import get_model_version
+from app.api.jobs import router as jobs_router, metrics_router as jobs_metrics_router
+
+from app.services.job_manager import JobManager
+
 
 # Initialize logging first
 setup_logging()
@@ -47,7 +51,21 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # Don't prevent startup - auth will fail at request time
         # This allows health checks to work even if Firebase is misconfigured
 
+    # Start Job Worker
+    job_manager = JobManager.get_instance()
+    worker_task = asyncio.create_task(job_manager.start_worker())
+
     yield
+
+    # Shutdown
+    job_manager._shutting_down = True
+    # Allow worker a moment to see shutdown flag if needed, or just cancel
+    worker_task.cancel()
+    try:
+        await worker_task
+    except asyncio.CancelledError:
+        pass
+
 
     # Shutdown
     logger.info("Shutting down MedGemma Service")
@@ -70,6 +88,9 @@ def create_app() -> FastAPI:
     # Register routes
     app.include_router(health_router)
     app.include_router(extract_router)
+    app.include_router(jobs_metrics_router)
+    app.include_router(jobs_router)
+
 
     # Register exception handlers
     app.add_exception_handler(RequestValidationError, validation_exception_handler)
