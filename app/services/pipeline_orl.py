@@ -429,34 +429,68 @@ async def _fallback_to_baseline(
         # Only re-raise if fallback also fails
         raise e
 
+
 async def _finalize_refine_fields(fields: StructuredFieldsV1) -> StructuredFieldsV1:
     """
-    Calls LLM to refine and deduplicate the aggregated fields.
+    Refines specific fields using LLM.
+    Currently focuses ONLY on rewriting 'padecimientoActual' (HPI) 
+    to medical terminology without hallucinating.
+    """
+    # Check if HPI needs rewriting
+    if not fields.padecimiento_actual:
+        return fields
+        
+    original_text = fields.padecimiento_actual.strip()
+    if not original_text:
+        return fields
+
+    try:
+        # Rewrite HPI
+        rewritten_text = await _rewrite_hpi_medical_es(original_text)
+        
+        # fallback: if empty response or error, keep original (handled in helper, but double check)
+        if rewritten_text and rewritten_text.strip():
+            fields.padecimiento_actual = rewritten_text
+            
+    except Exception as e:
+        # Never fail the pipeline for refinement errors
+        logger.warning("HPI rewrite failed", error=str(e))
+        # fields remain unchanged
+
+    return fields
+
+
+async def _rewrite_hpi_medical_es(text: str) -> str:
+    """
+    Rewrites HPI text into medical ORL style using LLM.
+    preserves numbers, times, laterality, negations.
     """
     settings = get_settings()
     
-    # 1. Helper to serialize current fields to JSON for prompt
-    # exclude_none=True to reduce noise, but V1 schema has many optionals.
-    input_json = fields.model_dump_json(exclude_none=True, indent=2)
-    
-    prompt = _build_finalize_prompt(input_json)
-    
-    # 2. Call LLM (similar to extractor)
+    # Prompt definition
+    system_prompt = (
+        "Eres médico ORL. Reescribe el texto de padecimiento actual en estilo clínico (HPI) "
+        "usando SOLO la información dada. No inventes datos. "
+        "Mantén números, tiempos, lateralidad y negaciones. "
+        "Output: solo el texto final."
+    )
+    user_content = f'INPUT_HPI: "{text}"'
+
     base_url = settings.openai_compat_base_url.rstrip("/")
     url = f"{base_url}/chat/completions"
-    timeout_s = settings.openai_compat_timeout_ms / 1000.0
-    # Allow slightly less than global if needed, but we use FINALIZE_TIMEOUT_S wrapping this call
+    timeout_s = 10.0 # Short timeout for this specific small task
     
     payload = {
         "model": settings.openai_compat_model,
         "messages": [
-            {"role": "user", "content": prompt}
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content}
         ],
         "temperature": 0.0,
-        "max_tokens": 2048,
+        "max_tokens": 256, # Keep it short
         "stream": False
     }
-    
+
     async with httpx.AsyncClient(timeout=timeout_s) as client:
         response = await client.post(
             url,
@@ -465,17 +499,19 @@ async def _finalize_refine_fields(fields: StructuredFieldsV1) -> StructuredField
         )
         response.raise_for_status()
         
-    # 3. Parse Response
     result = response.json()
     choices = result.get("choices", [])
     if not choices:
-        raise ValueError("No choices in LLM response")
+        return text # fallback
         
     choice = choices[0]
     content = choice.get("message", {}).get("content", "") or choice.get("text", "")
     
-    # Reuse existing V1 parser/repair logic from extractor service?
-    # Importing `_parse_v1_output` from `structured_v1_extractor` (we added it to imports)
-    parsed_fields = _parse_v1_output(content)
+    clean_content = content.strip()
     
-    return parsed_fields
+    # Basic validation: ensure we didn't lose too much content or get empty string
+    if not clean_content:
+        return text
+        
+    return clean_content
+

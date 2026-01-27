@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 
 from app.core.logging import get_safe_logger
 from app.core.config import get_settings
+from app.core.circuit_breaker import get_circuit_breaker, PipelineState
 from app.schemas.request import ExtractRequest
 from app.services.structured_v1_extractor import extract_structured_v1
 
@@ -67,6 +68,7 @@ class JobManager:
         }
         
         self._shutting_down = False
+        self._maintenance_mode = False
     
     @classmethod
     def get_instance(cls):
@@ -77,6 +79,17 @@ class JobManager:
     @property
     def max_daily_quota(self) -> int:
         return get_settings().job_queue_daily_quota
+    
+    @property
+    def maintenance_mode(self) -> bool:
+        return self._maintenance_mode
+
+    def set_maintenance_mode(self, enabled: bool):
+        self._maintenance_mode = enabled
+        logger.warning(
+            f"Maintenance mode {'ENABLED' if enabled else 'DISABLED'}",
+            action="maintenance_toggle"
+        )
 
     def get_job(self, job_id: str) -> Optional[Job]:
 
@@ -87,6 +100,18 @@ class JobManager:
         Enqueues a new job if quotas allow.
         Returns job_id or raises exception.
         """
+        if self._maintenance_mode:
+            raise RuntimeError("Service is under maintenance")
+            
+        # Check for auto-recovery before rejecting
+        self._check_recovery_conditions()
+        
+        cb_state = get_circuit_breaker().state
+        if cb_state == PipelineState.DISABLED:
+            raise RuntimeError("Service is disabled (Kill-Switch)")
+            
+        # 1. Check User Active Jobs Limit
+
         # 1. Check User Active Jobs Limit
         if user_id in self._user_active_jobs:
             existing_id = self._user_active_jobs[user_id]
@@ -171,8 +196,9 @@ class JobManager:
                     await self._process_job(job_id)
                     self._queue.task_done()
                 except asyncio.TimeoutError:
-                    # No jobs in 60s, run cleanup
+                    # No jobs in 60s, run cleanup and check recovery
                     self._cleanup_stale_jobs()
+                    self._check_recovery_conditions()
             except Exception as e:
                 logger.error("Worker error loop", error_code="WORKER_ERROR")
                 # Prevent tight loop on error (though wait_for protects us mostly)
@@ -194,16 +220,30 @@ class JobManager:
         logger.info("Job started", job_id=job_id)
 
         try:
-            # Execute Extraction (using structured v1 as per intent)
-            # We assume structured_v1 is the target for this Beta feature
+            # Execute Extraction
+            # Check Circuit Breaker for DEGRADED state (Fallback)
+            cb_state = get_circuit_breaker().state
             
-            # NOTE: We are running in the main event loop because extract functions are async.
-            # If they were blocking, we'd need run_in_executor.
-            
-            result, inference_ms, model_version = await extract_structured_v1(
-                transcript=job.request.transcript,
-                context=job.request.context
-            )
+            if cb_state == PipelineState.DEGRADED:
+                # Force fallback (baseline / heuristic / mock if implemented)
+                logger.warning("Executing in DEGRADED mode (Fallback)", job_id=job_id)
+                
+                # Mock heuristic fallback for Beta
+                from app.schemas.structured_fields_v1 import StructuredFieldsV1
+                result = StructuredFieldsV1(
+                    motivoConsulta="[DEGRADED MODE] Servicio degradado temporalmente.",
+                    diagnostico={"texto": "Servicio no disponible", "tipo": "sindromico"}
+                )
+                inference_ms = 0
+                model_version = "fallback-heuristic"
+                job.fallback_used = True
+                
+            else:
+                # Normal Execution
+                result, inference_ms, model_version = await extract_structured_v1(
+                    transcript=job.request.transcript,
+                    context=job.request.context
+                )
             
             job.result = result
             job.inference_ms = inference_ms
@@ -244,7 +284,18 @@ class JobManager:
             del self._jobs[jid]
             # Note: Do not delete from daily counts!
 
+    def _check_recovery_conditions(self):
+        """Helper to trigger circuit breaker recovery check."""
+        # Only check if strictly needed to avoid overhead? 
+        # But we need metrics.
+        # Let's use the lightweight get_metrics() or construct ad-hoc?
+        # evaluating recovery uses: in_queue, fail_rate, active.
+        # get_observability_metrics() calculates these.
+        metrics = self.get_observability_metrics()
+        get_circuit_breaker().evaluate_recovery(metrics)
+
     def get_observability_metrics(self) -> Dict[str, Any]:
+
         """
         Get aggregated PHI-safe metrics for observability dashboard.
         Returns JSON-serializable dict compatible with /v1/jobs/metrics.
@@ -279,7 +330,12 @@ class JobManager:
                 "in_queue": self._queue.qsize(),
                 "active": 1 if self._active_job_id else 0,
                 "completed": completed,
-                "failed": failures
+                "failed": failures,
+                "active": 1 if self._active_job_id else 0,
+                "completed": completed,
+                "failed": failures,
+                "maintenance_mode": self._maintenance_mode,
+                "circuit_breaker_state": get_circuit_breaker().state.value
             },
             "latency_ms": {
                 "queue": {

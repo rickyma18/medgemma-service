@@ -11,7 +11,7 @@ from typing import Dict
 
 
 # Default limits
-DEFAULT_REQUESTS_PER_HOUR = 60
+DEFAULT_REQUESTS_PER_HOUR = 600
 WINDOW_SECONDS = 3600  # 1 hour
 
 

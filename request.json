@@ -1,0 +1,17 @@
+{
+    "transcript": {
+        "segments": [
+            {
+                "speaker": "patient",
+                "text": "Tengo dolor de oído derecho desde ayer",
+                "startMs": 0,
+                "endMs": 2000
+            }
+        ],
+        "language": "es",
+        "durationMs": 2000
+    },
+    "context": {
+        "specialty": "orl"
+    }
+}

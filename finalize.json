@@ -1,0 +1,11 @@
+{
+    "structuredFields": {
+        "motivoConsulta": "Dolor de garganta",
+        "padecimientoActual": "Hace 3 dias",
+        "diagnostico": {
+            "texto": "Faringitis",
+            "tipo": "presuntivo"
+        }
+    },
+    "refine": false
+}

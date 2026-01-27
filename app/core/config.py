@@ -179,6 +179,21 @@ class Settings(BaseSettings):
         description="Optional API key for admin endpoints (X-Admin-Token)"
     )
 
+    alert_sinks: str = Field(
+        default="logging",
+        description="Comma-separated list of alert sinks: logging, slack_stub"
+    )
+
+    # Circuit Breaker Configuration
+    circuit_breaker_cooldown_seconds: int = Field(
+        default=300,
+        description="Base cooldown in seconds for circuit breaker recovery"
+    )
+    circuit_breaker_recovery_failure_threshold: float = Field(
+        default=0.05,
+        description="Max failure rate allowed to transition DEGRADED -> ENABLED"
+    )
+
     @field_validator("firebase_credentials_json", mode="before")
     @classmethod
     def validate_credentials_json(cls, v: Optional[str]) -> Optional[str]:

@@ -14,6 +14,8 @@ router = APIRouter(prefix="/v1", tags=["jobs"], dependencies=[Depends(verify_aut
 metrics_router = APIRouter(prefix="/v1", tags=["jobs"])
 logger = get_safe_logger(__name__)
 
+from app.core.circuit_breaker import get_circuit_breaker, PipelineState
+
 
 @metrics_router.get(
     "/jobs/metrics",
@@ -40,6 +42,70 @@ async def get_job_metrics(
 
     job_manager = JobManager.get_instance()
     return job_manager.get_observability_metrics()
+
+
+from pydantic import BaseModel
+
+class MaintenanceConfig(BaseModel):
+    enabled: bool
+
+@metrics_router.post(
+    "/jobs/admin/maintenance",
+    summary="Toggle maintenance mode (Admin)",
+    status_code=status.HTTP_200_OK
+)
+async def toggle_maintenance(
+    config: MaintenanceConfig,
+    x_admin_token: Annotated[Optional[str], Header(alias="X-Admin-Token")] = None,
+):
+    """
+    Enable/disable maintenance mode.
+    When enabled, new jobs are rejected with 503.
+    Existing jobs continue to process.
+    """
+    settings = get_settings()
+    if settings.admin_api_key:
+        if not x_admin_token or x_admin_token != settings.admin_api_key:
+            raise HTTPException(status_code=403, detail="Invalid admin token")
+            
+    job_manager = JobManager.get_instance()
+    job_manager.set_maintenance_mode(config.enabled)
+    return {"success": True, "maintenance_mode": config.enabled}
+
+
+class CircuitBreakerConfig(BaseModel):
+    state: PipelineState
+    manual_override: bool = True  # If true, locks state. If false, clears manual override.
+
+@metrics_router.post(
+    "/jobs/admin/circuit-breaker",
+    summary="Manual Kill-Switch (Admin)",
+    status_code=status.HTTP_200_OK
+)
+async def set_circuit_breaker(
+    config: CircuitBreakerConfig,
+    x_admin_token: Annotated[Optional[str], Header(alias="X-Admin-Token")] = None,
+):
+    """
+    Manually control the pipeline circuit breaker.
+    - state: enabled | degraded | disabled
+    - manual_override: if true, forces state. if false, resumes auto-mode (ignores state).
+    """
+    settings = get_settings()
+    if settings.admin_api_key:
+        if not x_admin_token or x_admin_token != settings.admin_api_key:
+            raise HTTPException(status_code=403, detail="Invalid admin token")
+            
+    cb = get_circuit_breaker()
+    
+    if config.manual_override:
+        cb.set_manual_override(config.state)
+        message = f"Circuit breaker forced to {config.state.value}"
+    else:
+        cb.set_manual_override(None)
+        message = "Circuit breaker auto-mode resumed"
+        
+    return {"success": True, "message": message, "current_state": cb.state.value}
 
 
 @router.post(
@@ -92,6 +158,17 @@ async def submit_job(
         )
         
     except RuntimeError as e:
+        msg = str(e)
+        if "maintenance" in msg.lower():
+            logger.warning(f"Job rejected (maintenance): {e}", user_id=uid)
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={
+                    "success": False,
+                    "message": "Service is under maintenance. Please try again later."
+                }
+            )
+
         # Quota exceeded
         logger.warning(f"Job quota exceeded: {e}", user_id=uid)
         return JSONResponse(
