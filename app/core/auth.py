@@ -189,11 +189,9 @@ def verify_firebase_token(token: str) -> str:
         
         logger.warning(
             "DEBUG-AUTH: DEV mode token comparison",
-            expected_token_repr=repr(expected_token),
-            expected_len=len(expected_token) if expected_token else 0,
-            received_token_repr=repr(received_token),
-            received_len=len(received_token) if received_token else 0,
-            tokens_equal=(received_token == expected_token),
+            received_token_len=len(received_token),
+            is_match=(received_token == expected_token),
+            starts_with_dev=(received_token.startswith("dev-token")),
             auth_mode=settings.auth_mode,
         )
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -201,6 +199,9 @@ def verify_firebase_token(token: str) -> str:
         if received_token == expected_token:
             # Return fixed dev uid - DO NOT LOG
             return "dev_uid"
+        elif received_token.startswith("dev-token"):
+            # Dynamic dev user for testing multiple users
+            return received_token
         else:
             # Token doesn't match - same error format as Firebase
             logger.warning(

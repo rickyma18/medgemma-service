@@ -1,3 +1,4 @@
+import re
 from typing import Annotated, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Header, status
@@ -146,15 +147,30 @@ async def submit_job(
         
     except ValueError as e:
         # User has job in progress
-        logger.warning(f"Job submission conflict: {e}", user_id=uid)
+        msg = str(e)
+        logger.warning(f"Job submission conflict: {msg}", user_id=uid)
+
+        # Parse existingJobId from message if possible (format: "...: <uuid>")
+        existing_job_id = None
+        match = re.search(r"([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})", msg)
+        if match:
+            existing_job_id = match.group(1)
+
+        content = {
+            "success": False,
+            "error": {
+                "code": "BUSY",
+                "message": "User already has a job in progress"
+            },
+            "metadata": {}
+        }
+        
+        if existing_job_id:
+            content["existingJobId"] = existing_job_id
+
         return JSONResponse(
             status_code=status.HTTP_409_CONFLICT,
-            content={
-                "success": False,
-                # "existingJobId": ??? - we could parse it from exception or change exception 
-                # but simple message is fine per spec unless stricter needed
-                "message": str(e)
-            }
+            content=content
         )
         
     except RuntimeError as e:
