@@ -47,15 +47,25 @@ def _build_lite_system_prompt() -> str:
     return '''Extrae informacion clinica ORL a JSON. Reglas:
 1. Si NO se menciona -> null (nunca inventar)
 2. diagnostico.texto OBLIGATORIO (si no hay -> "Consulta ORL en estudio")
-3. exploracionFisica = SOLO hallazgos del medico
+3. exploracionFisica = SOLO hallazgos del medico (NO lo que refiere el paciente)
 
 JSON Schema:
 {
   "motivoConsulta": "string|null",
   "padecimientoActual": "string|null",
-  "antecedentes": {"heredofamiliares":null,"personalesNoPatologicos":null,"personalesPatologicos":null},
-  "exploracionFisica": {"signosVitales":null,"rinoscopia":null,"orofaringe":null,"cuello":null,"otoscopia":null},
-  "diagnostico": {"texto":"OBLIGATORIO","tipo":"definitivo|presuntivo|sindromico","cie10":null},
+  "antecedentes": {
+    "heredofamiliares": "string|null",
+    "personalesNoPatologicos": "string|null",
+    "personalesPatologicos": "string|null"
+  },
+  "exploracionFisica": {
+    "signosVitales": "string|null",
+    "rinoscopia": "string|null",
+    "orofaringe": "string|null",
+    "cuello": "string|null",
+    "otoscopia": "string|null"
+  },
+  "diagnostico": {"texto":"OBLIGATORIO","tipo":"definitivo|presuntivo|sindromico","cie10":"string|null"},
   "planTratamiento": "string|null"
 }
 
