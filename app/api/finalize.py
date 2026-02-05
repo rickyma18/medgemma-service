@@ -2,9 +2,10 @@
 Finalize API endpoint.
 Handles post-processing, contract verification, and quality checks for extracted fields.
 """
+import re
 import time
 import uuid
-from typing import Annotated, Union
+from typing import Annotated, Any, Dict, List, Optional, Union
 
 from fastapi import APIRouter, Depends, Header, Request, status
 from fastapi.responses import JSONResponse
@@ -41,6 +42,163 @@ def _compute_confidence_label(confidence: float) -> str:
         return "media"
     else:
         return "alta"
+
+
+# ---------------------------------------------------------------------------
+# Deterministic consistency check helpers (no LLM)
+# ---------------------------------------------------------------------------
+
+_NEGATION_RX = re.compile(
+    r'(?:niega|sin|no\s+refiere|no\s+tiene|no\s+presenta|no\s+consume|no\s+usa)\s+'
+    r'(.+?)(?:\.|,|;|\s+y\s|$)',
+    re.IGNORECASE,
+)
+
+_ALLERGY_ASSERT_RX = re.compile(
+    r'al[eé]rgic[oa]\s+a\s+(.+?)(?:\.|,|;|$)',
+    re.IGNORECASE,
+)
+
+_ALLERGY_NEGATION_RX = re.compile(
+    r'(?:niega|sin)\s+alergias(?:\s+conocidas)?',
+    re.IGNORECASE,
+)
+
+# (field_path used in warning, accessor returning Optional[str])
+_CONSISTENCY_FIELDS = [
+    ("antecedentes.personalesNoPatologicos",
+     lambda sf: sf.antecedentes.personales_no_patologicos if sf.antecedentes else None),
+    ("antecedentes.personalesPatologicos",
+     lambda sf: sf.antecedentes.personales_patologicos if sf.antecedentes else None),
+    ("antecedentes.heredofamiliares",
+     lambda sf: sf.antecedentes.heredofamiliares if sf.antecedentes else None),
+    ("diagnostico.texto",
+     lambda sf: sf.diagnostico.texto if sf.diagnostico else None),
+    ("planTratamiento",
+     lambda sf: sf.plan_tratamiento),
+]
+
+
+def _transcript_full_text(transcript) -> str:
+    """Flatten transcript into a single string.
+
+    Handles:
+    - None -> ""
+    - str -> returns as-is
+    - Transcript object -> joins seg.text
+    - dict -> extracts segments[].text defensively
+    """
+    if transcript is None:
+        return ""
+    # String: use directly
+    if isinstance(transcript, str):
+        return transcript
+    # Transcript object: has .segments attribute
+    if hasattr(transcript, "segments"):
+        return " ".join(seg.text for seg in transcript.segments if seg.text)
+    # Dict fallback (defensive)
+    if isinstance(transcript, dict):
+        segments = transcript.get("segments", [])
+        texts = []
+        for seg in segments:
+            if isinstance(seg, dict):
+                t = seg.get("text", "")
+                if t:
+                    texts.append(t)
+        return " ".join(texts)
+    return ""
+
+
+def _field_affirms_item(field_value: str, item: str) -> bool:
+    """Return True if *field_value* mentions *item* without a preceding negation."""
+    field_lower = field_value.lower()
+    item_lower = item.lower()
+    if item_lower not in field_lower:
+        return False
+    # Check a 40-char window before the item for negation words
+    idx = field_lower.index(item_lower)
+    prefix = field_lower[max(0, idx - 40):idx]
+    if re.search(r'(?:niega|sin\b|no\b|negativo)', prefix):
+        return False
+    return True
+
+
+def _make_warning(
+    field: str, message: str, evidence: str,
+) -> Dict[str, Any]:
+    return {
+        "type": "consistency",
+        "severity": "warning",
+        "field": field,
+        "message": message,
+        "evidence": evidence[:160],
+    }
+
+
+def _check_consistency(structured_fields, transcript) -> List[Dict[str, Any]]:
+    """
+    Deterministic consistency check: transcript negations vs structured fields.
+    Returns a list of warning dicts.  No LLM calls.
+    """
+    text = _transcript_full_text(transcript)
+    if not text.strip():
+        return []
+
+    warnings: List[Dict[str, Any]] = []
+    text_lower = text.lower()
+
+    # (a) General negations vs all fields
+    for match in _NEGATION_RX.finditer(text_lower):
+        negated_item = match.group(1).strip()
+        if len(negated_item) < 3:
+            continue
+        evidence = match.group(0).strip()[:160]
+        for field_path, accessor in _CONSISTENCY_FIELDS:
+            field_value = accessor(structured_fields)
+            if field_value and _field_affirms_item(field_value, negated_item):
+                warnings.append(_make_warning(
+                    field=field_path,
+                    message=(
+                        f"Posible contradicción: el transcript dice "
+                        f"'{evidence}' pero en {field_path} se registra "
+                        f"'{negated_item}'."
+                    ),
+                    evidence=evidence,
+                ))
+
+    # (b) Allergy-specific checks
+    patologicos = ""
+    if structured_fields.antecedentes:
+        patologicos = (structured_fields.antecedentes.personales_patologicos or "").lower()
+
+    # "niega alergias" but field records allergies
+    allergy_neg = _ALLERGY_NEGATION_RX.search(text_lower)
+    if allergy_neg and re.search(r'al[eé]rgi', patologicos):
+        ev = allergy_neg.group(0).strip()[:160]
+        warnings.append(_make_warning(
+            field="antecedentes.personalesPatologicos",
+            message=(
+                f"Posible contradicción: el transcript dice '{ev}' "
+                f"pero en antecedentes se registran alergias."
+            ),
+            evidence=ev,
+        ))
+
+    # "alérgico a X" asserted in transcript but missing from field
+    for match in _ALLERGY_ASSERT_RX.finditer(text_lower):
+        allergen = match.group(1).strip()
+        if allergen and allergen not in patologicos:
+            ev = match.group(0).strip()[:160]
+            warnings.append(_make_warning(
+                field="antecedentes.personalesPatologicos",
+                message=(
+                    f"Posible omisión: el transcript dice '{ev}' "
+                    f"pero no se registra en antecedentes."
+                ),
+                evidence=ev,
+            ))
+
+    return warnings
 
 
 @router.post(
@@ -82,7 +240,8 @@ async def finalize_extraction(
         method="POST",
         path="/v1/finalize",
         has_transcript=bool(request_body.transcript),
-        refine_requested=request_body.refine
+        refine_requested=request_body.refine,
+        check_consistency=request_body.check_consistency
     )
 
     try:
@@ -112,6 +271,16 @@ async def finalize_extraction(
                 logger.warning("Refinement failed during finalize", error=str(e))
                 # Fallback to original fields, but add warning
                 contract_warnings.append(f"refinement_failed:{type(e).__name__}")
+                contract_status = "warning"
+
+        # 2.5 Deterministic consistency check (no LLM)
+        consistency_warnings: list = []
+        if request_body.check_consistency:
+            consistency_warnings = _check_consistency(
+                final_fields, request_body.transcript
+            )
+            if consistency_warnings:
+                contract_warnings = contract_warnings + consistency_warnings
                 contract_status = "warning"
 
         latency_ms = int((time.perf_counter() - start_time) * 1000)

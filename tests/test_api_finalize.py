@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 from app.main import create_app
 from app.core.auth import verify_auth_header
 from app.schemas.structured_fields_v1 import StructuredFieldsV1
+from app.schemas.request import Transcript, TranscriptSegment
 
 
 # Helper to bypass auth - MUST have Request type annotation!
@@ -238,3 +239,163 @@ def test_finalize_both_structured_fields_prefers_new(client, mock_contracts, sam
     # Should use structuredFields, not structuredV1
     assert data["data"]["motivoConsulta"] == "Dolor de garganta"
     assert data["data"]["motivoConsulta"] != "Legacy motivo"
+
+
+# --- Consistency check tests (Epic 6) ---
+
+def _make_transcript_payload(*texts: str) -> dict:
+    """Build a minimal Transcript dict from plain text strings."""
+    segments = []
+    offset = 0
+    for t in texts:
+        dur = len(t) * 50  # arbitrary ms per char
+        segments.append({
+            "speaker": "doctor",
+            "text": t,
+            "startMs": offset,
+            "endMs": offset + dur,
+        })
+        offset += dur
+    return {
+        "segments": segments,
+        "language": "es",
+        "durationMs": offset,
+    }
+
+
+def test_consistency_false_no_extra_warnings(client, mock_contracts):
+    """check_consistency=false should NOT add consistency warnings."""
+    mock_contracts.return_value = {"warnings": [], "details": None}
+
+    fields = StructuredFieldsV1(
+        motivoConsulta="Dolor de garganta",
+        antecedentes={"personalesNoPatologicos": "Tabaquismo positivo, 10 cigarros/día"},
+        diagnostico={"texto": "Faringitis", "tipo": "presuntivo"},
+    )
+
+    payload = {
+        "structuredFields": fields.model_dump(by_alias=True),
+        "transcript": _make_transcript_payload(
+            "Paciente niega tabaquismo."
+        ),
+        "checkConsistency": False,
+    }
+
+    response = client.post("/v1/finalize", json=payload)
+    assert response.status_code == 200
+    metadata = response.json()["metadata"]
+
+    # No consistency warnings should appear
+    assert metadata["contractWarnings"] == []
+    assert metadata["warnings"] == metadata["contractWarnings"]
+    assert metadata["contractStatus"] == "ok"
+
+
+def test_consistency_true_detects_negation_contradiction(client, mock_contracts):
+    """check_consistency=true + 'niega tabaquismo' + field with tabaquismo => warning."""
+    mock_contracts.return_value = {"warnings": [], "details": None}
+
+    fields = StructuredFieldsV1(
+        motivoConsulta="Dolor de garganta",
+        antecedentes={"personalesNoPatologicos": "Tabaquismo positivo, 10 cigarros/día"},
+        diagnostico={"texto": "Faringitis", "tipo": "presuntivo"},
+    )
+
+    payload = {
+        "structuredFields": fields.model_dump(by_alias=True),
+        "transcript": _make_transcript_payload(
+            "Paciente niega tabaquismo."
+        ),
+        "checkConsistency": True,
+    }
+
+    response = client.post("/v1/finalize", json=payload)
+    assert response.status_code == 200
+    metadata = response.json()["metadata"]
+
+    # At least one consistency warning must be present
+    assert len(metadata["contractWarnings"]) >= 1
+    assert metadata["contractStatus"] == "warning"
+
+    # Find the consistency dict warning
+    consistency_warns = [
+        w for w in metadata["contractWarnings"]
+        if isinstance(w, dict) and w.get("type") == "consistency"
+    ]
+    assert len(consistency_warns) >= 1
+
+    w = consistency_warns[0]
+    assert w["severity"] == "warning"
+    assert w["field"] == "antecedentes.personalesNoPatologicos"
+    assert "tabaquismo" in w["message"].lower()
+    assert "evidence" in w
+    assert len(w["evidence"]) <= 160
+
+    # Flutter compat: warnings mirrors contractWarnings
+    assert metadata["warnings"] == metadata["contractWarnings"]
+
+
+def test_consistency_true_no_transcript_ok(client, mock_contracts):
+    """check_consistency=true but no transcript => 200 OK, no warnings."""
+    mock_contracts.return_value = {"warnings": [], "details": None}
+
+    fields = StructuredFieldsV1(
+        motivoConsulta="Dolor de garganta",
+        diagnostico={"texto": "Faringitis", "tipo": "presuntivo"},
+    )
+
+    payload = {
+        "structuredFields": fields.model_dump(by_alias=True),
+        "checkConsistency": True,
+        # No transcript provided
+    }
+
+    response = client.post("/v1/finalize", json=payload)
+    assert response.status_code == 200
+    metadata = response.json()["metadata"]
+
+    assert metadata["contractWarnings"] == []
+    assert metadata["warnings"] == []
+    assert metadata["contractStatus"] == "ok"
+
+
+def test_consistency_true_accepts_string_transcript(client, mock_contracts):
+    """check_consistency=true with plain string transcript detects contradiction."""
+    mock_contracts.return_value = {"warnings": [], "details": None}
+
+    fields = StructuredFieldsV1(
+        motivoConsulta="Dolor de garganta",
+        antecedentes={"personalesPatologicos": "Alergia a penicilina"},
+        diagnostico={"texto": "Faringitis", "tipo": "presuntivo"},
+    )
+
+    # Plain string transcript instead of Transcript object
+    payload = {
+        "structuredFields": fields.model_dump(by_alias=True),
+        "transcript": "Paciente niega alergias conocidas. Refiere dolor de garganta hace 3 días.",
+        "checkConsistency": True,
+    }
+
+    response = client.post("/v1/finalize", json=payload)
+    assert response.status_code == 200
+    metadata = response.json()["metadata"]
+
+    # Should detect contradiction: "niega alergias" but field has allergy
+    assert len(metadata["contractWarnings"]) >= 1
+    assert metadata["contractStatus"] == "warning"
+
+    # Find the consistency warning
+    consistency_warns = [
+        w for w in metadata["contractWarnings"]
+        if isinstance(w, dict) and w.get("type") == "consistency"
+    ]
+    assert len(consistency_warns) >= 1
+
+    w = consistency_warns[0]
+    assert w["severity"] == "warning"
+    assert w["field"] == "antecedentes.personalesPatologicos"
+    assert "evidence" in w
+    assert len(w["evidence"]) <= 160
+
+    # Flutter compat
+    assert metadata["warnings"] == metadata["contractWarnings"]

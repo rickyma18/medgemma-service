@@ -1,7 +1,7 @@
 """
 Finalize endpoint schemas.
 """
-from typing import List, Literal, Optional, Any, Dict
+from typing import List, Literal, Optional, Any, Dict, Union
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -37,9 +37,9 @@ class FinalizeRequest(BaseModel):
         description="DEPRECATED: Use 'structuredFields' instead. This field is kept for backwards compatibility with older Flutter clients and will be removed in a future version.",
         deprecated=True
     )
-    transcript: Optional[Transcript] = Field(
+    transcript: Optional[Union[Transcript, str]] = Field(
         default=None,
-        description="Original transcript (optional, for reference/logging context)"
+        description="Original transcript (optional, for reference/logging context). Can be Transcript object or plain string."
     )
     context: Optional[Context] = Field(
         default=None,
@@ -49,6 +49,11 @@ class FinalizeRequest(BaseModel):
     refine: bool = Field(
         default=False,
         description="Whether to run LLM refinement (expensive). Default False (just contract checks)."
+    )
+    check_consistency: bool = Field(
+        default=False,
+        alias="checkConsistency",
+        description="Run deterministic consistency checks between transcript and structured fields (no LLM)."
     )
 
     @model_validator(mode="after")
@@ -81,7 +86,7 @@ class FinalizeMetadata(BaseModel):
 
     # Contract/Quality fields
     contract_status: Literal["ok", "warning", "drift"] = Field(..., alias="contractStatus")
-    contract_warnings: List[str] = Field(default_factory=list, alias="contractWarnings")
+    contract_warnings: List[Any] = Field(default_factory=list, alias="contractWarnings")
     contract_details: Optional[Dict[str, Any]] = Field(default=None, alias="contractDetails")
 
     classification_confidence: float = Field(
@@ -92,7 +97,7 @@ class FinalizeMetadata(BaseModel):
 
     # --- Flutter backwards compatibility fields ---
     # warnings: mirrors contractWarnings for Flutter
-    warnings: List[str] = Field(
+    warnings: List[Any] = Field(
         default_factory=list,
         description="[Flutter compat] Alias for contractWarnings"
     )
