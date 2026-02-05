@@ -29,8 +29,29 @@ logger = get_safe_logger(__name__)
 # Version identifier for this extractor
 V1_EXTRACTOR_VERSION = "structured-v1"
 
+# Scope -> allowed fields mapping
+# Fields outside scope will be masked to null/empty POST-LLM
+SCOPE_ALLOWED_FIELDS: dict[str, set[str]] = {
+    "interview": {
+        "motivoConsulta",
+        "padecimientoActual",
+        "antecedentes",  # includes all nested: heredofamiliares, personalesNoPatologicos, personalesPatologicos
+    },
+    "exam": {
+        "exploracionFisica",  # includes all nested: signosVitales, rinoscopia, orofaringe, cuello, etc.
+    },
+    "studies": {
+        "estudiosIndicados",
+    },
+    "assessment": {
+        "diagnostico",
+        "planTratamiento",
+        "pronostico",
+    },
+}
 
-def _build_v1_system_prompt() -> str:
+
+def _build_v1_system_prompt(scope: str | None = None) -> str:
     """
     System prompt optimizado para MedGemma.
 
@@ -38,8 +59,12 @@ def _build_v1_system_prompt() -> str:
     - Incluye few-shot example (critico para extraccion precisa)
     - Reglas criticas al INICIO (primacy effect)
     - Campos alineados a nomenclatura medica mexicana
+
+    Args:
+        scope: Optional extraction scope (interview, exam, studies, assessment).
+               If provided, instructs LLM to only fill scoped fields.
     """
-    return '''Eres un asistente de documentacion clinica ORL. Extrae informacion de transcripciones medicas a JSON.
+    base_prompt = '''Eres un asistente de documentacion clinica ORL. Extrae informacion de transcripciones medicas a JSON.
 
 ## REGLAS CRITICAS
 1. Si NO se menciona → null (nunca inventar, nunca "no especificado")
@@ -125,6 +150,71 @@ SALIDA:
 - Ronquera → "Disfonia en estudio"
 
 Responde SOLO con JSON valido, sin explicaciones ni markdown.'''
+
+    # Add scope instruction if provided
+    if scope:
+        scope_instructions = {
+            "interview": "SCOPE: Solo extrae motivoConsulta, padecimientoActual y antecedentes. Deja el resto como null.",
+            "exam": "SCOPE: Solo extrae exploracionFisica (todos sus subcampos). Deja el resto como null.",
+            "studies": "SCOPE: Solo extrae estudiosIndicados. Deja el resto como null.",
+            "assessment": "SCOPE: Solo extrae diagnostico, planTratamiento y pronostico. Deja el resto como null.",
+        }
+        if scope in scope_instructions:
+            base_prompt += f"\n\n{scope_instructions[scope]}"
+
+    return base_prompt
+
+
+def _apply_scope_mask(data: dict, scope: str) -> dict:
+    """
+    Force all fields outside the scope to null/empty, POST-LLM.
+
+    This is a security measure to ensure the LLM cannot "contaminate"
+    fields outside the requested scope, regardless of what it returns.
+
+    Args:
+        data: The repaired dict from _repair_v1_dict
+        scope: The extraction scope (interview, exam, studies, assessment)
+
+    Returns:
+        Dict with only scoped fields populated; all others null/empty.
+    """
+    allowed = SCOPE_ALLOWED_FIELDS.get(scope, set())
+    if not allowed:
+        # Unknown scope or "studies" with no fields in schema -> return minimal
+        return {
+            "antecedentes": {},
+            "exploracionFisica": {},
+        }
+
+    # Define all top-level field keys
+    all_fields = {
+        "motivoConsulta",
+        "padecimientoActual",
+        "antecedentes",
+        "exploracionFisica",
+        "diagnostico",
+        "planTratamiento",
+        "pronostico",
+        "estudiosIndicados",
+        "notasAdicionales",
+    }
+
+    masked = {}
+    for field in all_fields:
+        if field in allowed:
+            # Keep the value from data
+            masked[field] = data.get(field)
+        else:
+            # Mask to null/empty based on field type
+            if field == "antecedentes":
+                masked[field] = {}
+            elif field == "exploracionFisica":
+                masked[field] = {}
+            else:
+                masked[field] = None
+
+    return masked
 
 
 def _build_v1_user_prompt(transcript: Transcript, context: Optional[Context]) -> str:
@@ -270,9 +360,13 @@ def _repair_v1_dict(data: dict) -> dict:
     return data
 
 
-def _parse_v1_output(output: str) -> StructuredFieldsV1:
+def _parse_v1_output(output: str, scope: str | None = None) -> StructuredFieldsV1:
     """
     Parsea y valida el output del modelo como StructuredFieldsV1.
+
+    Args:
+        output: Raw model output string
+        scope: Optional extraction scope. If provided, applies mask POST-repair.
 
     Raises:
         ModelError: Si el output no es JSON valido o no cumple el schema
@@ -303,6 +397,11 @@ def _parse_v1_output(output: str) -> StructuredFieldsV1:
 
     try:
         repaired = _repair_v1_dict(data)
+
+        # Apply scope mask POST-repair to prevent LLM contamination
+        if scope:
+            repaired = _apply_scope_mask(repaired, scope)
+
         return StructuredFieldsV1.model_validate(repaired)
     except ValidationError:
         raise ModelError("La salida no cumple el schema StructuredFieldsV1")
@@ -341,8 +440,13 @@ async def extract_structured_v1(
         # Log solo conteo, PHI-safe
         logger.info("v1_normalization_applied", replacements=nrep)
 
+    # Extract scope from context (if provided)
+    scope = context.scope if context else None
+    if scope:
+        logger.info("v1_scoped_extraction", scope=scope)
+
     # Construir prompts (PHI - no se loguea)
-    system_prompt = _build_v1_system_prompt()
+    system_prompt = _build_v1_system_prompt(scope)
     user_prompt = _build_v1_user_prompt(transcript, context)
 
     # Preparar request
@@ -422,8 +526,8 @@ async def extract_structured_v1(
     except (KeyError, IndexError, TypeError):
         raise ModelError("Formato de respuesta invalido del backend")
 
-    # Parsear y validar output
-    fields = _parse_v1_output(model_output)
+    # Parsear y validar output (with scope mask if applicable)
+    fields = _parse_v1_output(model_output, scope)
 
     # 2. Post-procesamiento deterministico (Cuello <-> Orofaringe)
     fields = postprocess_orl_mapping(fields)

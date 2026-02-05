@@ -96,6 +96,10 @@ class Context(BaseModel):
         alias="patientGender",
         description="Patient gender"
     )
+    scope: Optional[Literal["interview", "exam", "studies", "assessment"]] = Field(
+        default=None,
+        description="Extraction scope: interview, exam, studies, or assessment. If null, full extraction."
+    )
 
     class Config:
         populate_by_name = True
