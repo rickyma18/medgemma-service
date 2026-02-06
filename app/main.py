@@ -22,6 +22,7 @@ from app.core.logging import get_safe_logger, setup_logging
 from app.schemas.response import ErrorDetail, ErrorResponse, ResponseMetadata
 from app.services.extractor import get_model_version
 from app.api.jobs import router as jobs_router, metrics_router as jobs_metrics_router
+from app.api.suggest_plan import router as suggest_plan_router
 
 from app.services.job_manager import JobManager
 
@@ -93,6 +94,7 @@ def create_app() -> FastAPI:
     app.include_router(finalize_router)
     app.include_router(jobs_metrics_router)
     app.include_router(jobs_router)
+    app.include_router(suggest_plan_router)
 
 
     # Register exception handlers
