@@ -1,6 +1,10 @@
 """
 Finalize API endpoint.
 Handles post-processing, contract verification, and quality checks for extracted fields.
+
+(c) Anti-hallucination policy (FIX #6): _enforce_evidence_policy() ensures that
+    fields which were null in the input are NOT filled by the LLM unless there is
+    keyword evidence in the transcript.  Applied after any refinement step.
 """
 import re
 import time
@@ -17,6 +21,7 @@ from app.core.metrics import get_metrics_collector
 from app.core.rate_limiter import get_rate_limiter
 from app.schemas.finalize import FinalizeRequest, FinalizeResponse, FinalizeMetadata
 from app.schemas.response import ErrorResponse, ErrorDetail, ResponseMetadata
+from app.schemas.structured_fields_v1 import StructuredFieldsV1
 from app.services.extractor import get_model_version
 
 # Reusing contract logic (No new logic invented)
@@ -201,6 +206,112 @@ def _check_consistency(structured_fields, transcript) -> List[Dict[str, Any]]:
     return warnings
 
 
+# ---------------------------------------------------------------------------
+# FIX #6: Anti-hallucination evidence policy
+# ---------------------------------------------------------------------------
+
+# Keywords per field that constitute transcript evidence.
+# If a field was null in the input and becomes non-null after refinement,
+# we require at least one keyword hit in the transcript to keep the value.
+_EVIDENCE_KEYWORDS: Dict[str, List[str]] = {
+    "motivoConsulta": [
+        "duele", "dolor", "molestia", "trae", "motivo", "consulta",
+        "problema", "queja", "viene por", "refiere",
+    ],
+    "padecimientoActual": [
+        "dia", "semana", "inicio", "empezo", "desde", "presenta",
+        "evolucion", "fiebre", "tos", "hora", "mes",
+    ],
+    "heredofamiliares": [
+        "padre", "madre", "hermano", "familia", "abuelo", "abuela",
+        "heredo",
+    ],
+    "personalesNoPatologicos": [
+        "fuma", "alcohol", "toma", "droga", "tabaco", "mascotas",
+        "mascota", "ocupacion", "vivienda", "trabaja", "cigarro",
+    ],
+    "personalesPatologicos": [
+        "alergi", "cirugi", "opera", "diabetes", "hipertension",
+        "medicament", "circuncis", "sulfa", "penicilina", "asma",
+    ],
+    "exploracionFisica": [
+        "explora", "observa", "cornete", "amigdala", "faringe",
+        "timpan", "cuello", "rinoscop", "otoscop", "mucosa", "septum",
+        "adenopat", "signos vitales", "tension",
+    ],
+    "planTratamiento": [
+        "tratamiento", "medicament", "dosis", "recet", "indic",
+        "mg", "cada", "tableta", "gotas",
+    ],
+}
+
+
+def _has_evidence(text: str, field_key: str) -> bool:
+    """Return True if *text* contains at least one keyword for *field_key*."""
+    if not text:
+        return False
+    text_lower = text.lower()
+    keywords = _EVIDENCE_KEYWORDS.get(field_key, [])
+    return any(kw in text_lower for kw in keywords)
+
+
+def _enforce_evidence_policy(
+    original_fields: StructuredFieldsV1,
+    refined_fields: StructuredFieldsV1,
+    transcript_text: str,
+) -> StructuredFieldsV1:
+    """
+    Anti-hallucination guard (FIX #6).
+
+    Rule: if a field was null/empty in *original_fields* and became non-null in
+    *refined_fields*, revert to null UNLESS the transcript contains keyword
+    evidence for that field.  Fields that were already non-null in the original
+    are left untouched (they come from extraction, not refinement).
+    """
+    result = refined_fields.model_copy(deep=True)
+
+    # --- top-level string fields ---
+    _top_fields = [
+        ("motivoConsulta", "motivo_consulta"),
+        ("padecimientoActual", "padecimiento_actual"),
+        ("planTratamiento", "plan_tratamiento"),
+    ]
+    for evidence_key, attr_name in _top_fields:
+        orig = getattr(original_fields, attr_name, None)
+        ref = getattr(result, attr_name, None)
+        if orig is None and ref is not None:
+            if not _has_evidence(transcript_text, evidence_key):
+                setattr(result, attr_name, None)
+
+    # --- antecedentes sub-fields ---
+    if original_fields.antecedentes and result.antecedentes:
+        _ant_fields = [
+            ("heredofamiliares", "heredofamiliares"),
+            ("personalesNoPatologicos", "personales_no_patologicos"),
+            ("personalesPatologicos", "personales_patologicos"),
+        ]
+        for evidence_key, attr_name in _ant_fields:
+            orig = getattr(original_fields.antecedentes, attr_name, None)
+            ref = getattr(result.antecedentes, attr_name, None)
+            if orig is None and ref is not None:
+                if not _has_evidence(transcript_text, evidence_key):
+                    setattr(result.antecedentes, attr_name, None)
+
+    # --- exploracionFisica sub-fields (single evidence key) ---
+    if original_fields.exploracion_fisica and result.exploracion_fisica:
+        for attr_name in (
+            "signos_vitales", "rinoscopia", "orofaringe", "cuello",
+            "laringoscopia", "otoscopia", "otomicroscopia", "endoscopia_nasal",
+        ):
+            orig = getattr(original_fields.exploracion_fisica, attr_name, None)
+            ref = getattr(result.exploracion_fisica, attr_name, None)
+            if orig is None and ref is not None:
+                if not _has_evidence(transcript_text, "exploracionFisica"):
+                    setattr(result.exploracion_fisica, attr_name, None)
+
+    return result
+
+
 @router.post(
     "/finalize",
     response_model=Union[FinalizeResponse, ErrorResponse],
@@ -261,6 +372,8 @@ async def finalize_extraction(
 
         # 2. Refinement (Optional)
         # If refinement logic is needed in future or requested via flag
+        # Deep copy original so in-place mutations during refine don't affect it.
+        original_fields = request_body.structured_fields.model_copy(deep=True)
         final_fields = request_body.structured_fields
         if request_body.refine:
             # Reusing existing refinement logic
@@ -272,6 +385,14 @@ async def finalize_extraction(
                 # Fallback to original fields, but add warning
                 contract_warnings.append(f"refinement_failed:{type(e).__name__}")
                 contract_status = "warning"
+
+        # 2.1 FIX #6: Anti-hallucination evidence policy (no LLM, deterministic).
+        # Prevents refinement from filling null fields without transcript evidence.
+        transcript_text = _transcript_full_text(request_body.transcript)
+        if transcript_text:
+            final_fields = _enforce_evidence_policy(
+                original_fields, final_fields, transcript_text
+            )
 
         # 2.5 Deterministic consistency check (no LLM)
         consistency_warnings: list = []
