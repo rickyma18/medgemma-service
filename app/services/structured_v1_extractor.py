@@ -51,27 +51,142 @@ SCOPE_ALLOWED_FIELDS: dict[str, set[str]] = {
 }
 
 
-def _build_v1_system_prompt(scope: str | None = None) -> str:
+# FIX #5: Threshold below which few-shot examples are injected
+# to prevent hallucination on sparse/short transcripts.
+SHORT_TRANSCRIPT_THRESHOLD = 150
+
+
+def _build_short_transcript_fewshot() -> str:
+    """
+    Few-shot examples for short transcripts (<150 chars).
+
+    Teaches the model to:
+    - Output null for fields not mentioned (no hallucination)
+    - Preserve pertinent negatives as data
+    - Route antecedentes to the correct subfield
+
+    PHI-safe: all examples are synthetic.
+    """
+    return '''
+
+## EJEMPLOS PARA TRANSCRIPTS CORTOS
+
+ENTRADA: "Padre diabetico. Niega alergias."
+SALIDA:
+{
+  "motivoConsulta": null,
+  "padecimientoActual": null,
+  "antecedentes": {
+    "heredofamiliares": "Padre con DM2",
+    "personalesNoPatologicos": null,
+    "personalesPatologicos": "Niega alergias"
+  },
+  "exploracionFisica": {},
+  "diagnostico": {"texto": "[sin diagnostico por falta de datos clinicos]", "tipo": "sindromico", "cie10": null},
+  "planTratamiento": null,
+  "pronostico": null,
+  "estudiosIndicados": null,
+  "notasAdicionales": null
+}
+
+ENTRADA: "No fuma, no toma. Le hicieron circuncision a los 5 anos."
+SALIDA:
+{
+  "motivoConsulta": null,
+  "padecimientoActual": null,
+  "antecedentes": {
+    "heredofamiliares": null,
+    "personalesNoPatologicos": "Niega tabaquismo. Niega alcoholismo",
+    "personalesPatologicos": "Circuncision a los 5 anos"
+  },
+  "exploracionFisica": {},
+  "diagnostico": {"texto": "[sin diagnostico por falta de datos clinicos]", "tipo": "sindromico", "cie10": null},
+  "planTratamiento": null,
+  "pronostico": null,
+  "estudiosIndicados": null,
+  "notasAdicionales": null
+}
+
+ENTRADA: "Alergico a sulfas. Mama hipertensa."
+SALIDA:
+{
+  "motivoConsulta": null,
+  "padecimientoActual": null,
+  "antecedentes": {
+    "heredofamiliares": "Madre con HTA",
+    "personalesNoPatologicos": null,
+    "personalesPatologicos": "Alergia a sulfas"
+  },
+  "exploracionFisica": {},
+  "diagnostico": {"texto": "[sin diagnostico por falta de datos clinicos]", "tipo": "sindromico", "cie10": null},
+  "planTratamiento": null,
+  "pronostico": null,
+  "estudiosIndicados": null,
+  "notasAdicionales": null
+}'''
+
+
+def _build_v1_system_prompt(
+    scope: str | None = None,
+    transcript_len: int = 0,
+) -> str:
     """
     System prompt optimizado para MedGemma.
 
-    - Mas conciso (modelos pequenos pierden contexto en prompts largos)
-    - Incluye few-shot example (critico para extraccion precisa)
-    - Reglas criticas al INICIO (primacy effect)
-    - Campos alineados a nomenclatura medica mexicana
+    (a) Prompt base: built in this function.
+    (b) Few-shot branch: injected when transcript_len < SHORT_TRANSCRIPT_THRESHOLD.
+    (c) Scope instructions: appended when scope is provided.
 
     Args:
         scope: Optional extraction scope (interview, exam, studies, assessment).
                If provided, instructs LLM to only fill scoped fields.
+        transcript_len: Effective transcript text length in chars.
+                        When < SHORT_TRANSCRIPT_THRESHOLD, few-shot examples are added.
     """
-    base_prompt = '''Eres un asistente de documentacion clinica ORL. Extrae informacion de transcripciones medicas a JSON.
+    base_prompt = '''Eres un asistente de documentacion clinica ORL.
 
-## REGLAS CRITICAS
+MISION: EXTRAER informacion del transcript a JSON. NO REDACTAR. NO INFERIR. NO INVENTAR.
+- Copia los datos tal como aparecen en el texto.
+- Si un campo no se menciona → null (o {} para objetos).
+- Preserva negaciones como evidencia ("niega diabetes" → registrar "Niega diabetes", NO null).
+
+## REGLAS CRITICAS (OBEDECE SIEMPRE)
+
+0. RESPETA EL CONTENIDO DEL TRANSCRIPT:
+   - Extrae SOLO lo que se menciona. NO inventes motivos ni sintomas.
+   - Si el transcript solo contiene antecedentes (p. ej. "no fuma, alergia a sulfas"), entonces:
+     motivoConsulta = null
+     padecimientoActual = null
+     diagnostico = "[sin datos de padecimiento actual]" SOLO si el schema lo obliga; si no, null.
+
 1. Si NO se menciona → null (nunca inventar, nunca "no especificado")
-2. exploracionFisica = SOLO hallazgos del MEDICO ("se observa", "a la exploracion")
-   - NO incluir sintomas del paciente ("me duele", "siento") → eso va en padecimientoActual
+   - EXCEPTO negativos pertinentes: "no fuma", "niega alergias", "sin cirugias", "no toma alcohol", "no drogas", "sin mascotas"
+     SON datos validos y DEBEN registrarse.
+   - Solo usar null si el tema NO se toco en la conversacion.
+
+1B. ENRUTAMIENTO DE ANTECEDENTES (MUY IMPORTANTE):
+   - Si el texto menciona habitos/negativos (fuma, alcohol, drogas, mascotas, vivienda) → va a antecedentes.personalesNoPatologicos.
+   - Si el texto menciona alergias ("alergico a", "alergia a", "reaccion a", "anafilaxia", "penicilina", "sulfas") → va a antecedentes.personalesPatologicos.
+   - Si el texto menciona cirugias/procedimientos ("operaron", "cirugia", "amigdalectomia", "circuncision") → va a antecedentes.personalesPatologicos.
+   - NO conviertas antecedentes en "dolor de garganta" u otros sintomas si no estan en el texto.
+
+2. exploracionFisica = hallazgos OBJETIVOS (lo que se ve/palpa/ausculta, NO sintomas subjetivos del paciente)
+   - En DICTADO (1 speaker): todo lo que describe el medico ES exploracion (ej. "cornetes hipertroficos, septum desviado")
+   - En CONSULTA: diferenciar medico ("se observa X") vs paciente ("me duele X" → padecimientoActual)
    - "placas/pus/exudado" pertenecen a orofaringe, NO a cuello.
-3. diagnostico es OBLIGATORIO: si no hay explicito → "[sintoma principal] en estudio"
+
+3. diagnostico es OBLIGATORIO:
+   - Si NO hay diagnostico explicito y NO hay padecimiento actual → "[sin diagnostico por falta de datos clinicos]".
+   - Si hay sintomas pero no diagnostico → "[sintoma principal] en estudio".
+
+4. "impresion" o "impresion diagnostica" = diagnostico (NO confundir con depresion ni estado de animo)
+
+## MAPEO DE CAMPOS
+- motivoConsulta: queja principal, 3-15 palabras. SOLO si el paciente/medico dice explicitamente por que viene.
+- padecimientoActual: cronologia de sintomas (inicio, evolucion, intensidad). 1-4 oraciones.
+- antecedentes.heredofamiliares: enfermedades de familiares directos. Ej: "Padre con DM2".
+- antecedentes.personalesNoPatologicos: habitos y negativos pertinentes. Ej: "Niega tabaquismo, niega alcoholismo".
+- antecedentes.personalesPatologicos: enfermedades cronicas, cirugias, alergias, medicamentos actuales.
 
 ## SCHEMA
 {
@@ -149,7 +264,12 @@ SALIDA:
 - Dolor oido → "Otalgia en estudio"
 - Ronquera → "Disfonia en estudio"
 
-Responde SOLO con JSON valido, sin explicaciones ni markdown.'''
+FORMATO:
+- Devuelve JSON valido EXACTAMENTE con el schema. No agregues texto afuera del JSON.'''
+
+    # FIX #5: Inject few-shot examples for short transcripts to prevent hallucination
+    if 0 < transcript_len < SHORT_TRANSCRIPT_THRESHOLD:
+        base_prompt += _build_short_transcript_fewshot()
 
     # Add scope instruction if provided
     if scope:
@@ -171,6 +291,12 @@ def _apply_scope_mask(data: dict, scope: str) -> dict:
 
     This is a security measure to ensure the LLM cannot "contaminate"
     fields outside the requested scope, regardless of what it returns.
+
+    TODO(FIX #8): This mask is too aggressive for interview scope.
+    It drops valid cross-scope data (e.g. allergies mentioned during exam step).
+    Consider preserving non-null out-of-scope fields as "bonus" data instead
+    of nullifying them, or moving the filter to the client (Flutter).
+    See: _apply_scope_mask, SCOPE_ALLOWED_FIELDS, lines 34-51.
 
     Args:
         data: The repaired dict from _repair_v1_dict
@@ -445,8 +571,11 @@ async def extract_structured_v1(
     if scope:
         logger.info("v1_scoped_extraction", scope=scope)
 
+    # Compute effective transcript length for few-shot decision (FIX #5)
+    transcript_len = sum(len(seg.text) for seg in transcript.segments)
+
     # Construir prompts (PHI - no se loguea)
-    system_prompt = _build_v1_system_prompt(scope)
+    system_prompt = _build_v1_system_prompt(scope, transcript_len)
     user_prompt = _build_v1_user_prompt(transcript, context)
 
     # Preparar request
