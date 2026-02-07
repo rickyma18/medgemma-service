@@ -285,33 +285,38 @@ FORMATO:
     return base_prompt
 
 
+def _is_effectively_empty(value) -> bool:
+    """Check if a value carries no useful information."""
+    if value is None:
+        return True
+    if isinstance(value, str) and not value.strip():
+        return True
+    if isinstance(value, dict) and not any(
+        not _is_effectively_empty(v) for v in value.values()
+    ):
+        return True
+    if isinstance(value, list) and len(value) == 0:
+        return True
+    return False
+
+
 def _apply_scope_mask(data: dict, scope: str) -> dict:
     """
-    Force all fields outside the scope to null/empty, POST-LLM.
+    Non-destructive scope mask applied POST-LLM.
 
-    This is a security measure to ensure the LLM cannot "contaminate"
-    fields outside the requested scope, regardless of what it returns.
-
-    TODO(FIX #8): This mask is too aggressive for interview scope.
-    It drops valid cross-scope data (e.g. allergies mentioned during exam step).
-    Consider preserving non-null out-of-scope fields as "bonus" data instead
-    of nullifying them, or moving the filter to the client (Flutter).
-    See: _apply_scope_mask, SCOPE_ALLOWED_FIELDS, lines 34-51.
+    In-scope fields are always preserved as-is. Out-of-scope fields are
+    kept when they contain actual data (cross-scope "bonus" data the LLM
+    extracted from the transcript), but normalized to null/{} when empty.
 
     Args:
         data: The repaired dict from _repair_v1_dict
         scope: The extraction scope (interview, exam, studies, assessment)
 
     Returns:
-        Dict with only scoped fields populated; all others null/empty.
+        Dict with scoped fields preserved; out-of-scope fields preserved
+        only when non-empty, otherwise normalized to null/{}.
     """
     allowed = SCOPE_ALLOWED_FIELDS.get(scope, set())
-    if not allowed:
-        # Unknown scope or "studies" with no fields in schema -> return minimal
-        return {
-            "antecedentes": {},
-            "exploracionFisica": {},
-        }
 
     # Define all top-level field keys
     all_fields = {
@@ -326,19 +331,21 @@ def _apply_scope_mask(data: dict, scope: str) -> dict:
         "notasAdicionales",
     }
 
+    # Dict-typed fields get {} instead of None when empty
+    dict_fields = {"antecedentes", "exploracionFisica"}
+
     masked = {}
     for field in all_fields:
+        value = data.get(field)
         if field in allowed:
-            # Keep the value from data
-            masked[field] = data.get(field)
+            # In-scope: always keep as-is
+            masked[field] = value
         else:
-            # Mask to null/empty based on field type
-            if field == "antecedentes":
-                masked[field] = {}
-            elif field == "exploracionFisica":
-                masked[field] = {}
+            # Out-of-scope: keep if non-empty, normalize if empty
+            if _is_effectively_empty(value):
+                masked[field] = {} if field in dict_fields else None
             else:
-                masked[field] = None
+                masked[field] = value
 
     return masked
 
