@@ -2,7 +2,7 @@
 Request schemas with strict Pydantic validation.
 PHI note: These schemas handle PHI data - NEVER log instances.
 """
-from typing import Literal, Optional
+from typing import List, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -99,6 +99,10 @@ class Context(BaseModel):
     scope: Optional[Literal["interview", "exam", "studies", "assessment"]] = Field(
         default=None,
         description="Extraction scope: interview, exam, studies, or assessment. If null, full extraction."
+    )
+    negations: Optional[List[str]] = Field(
+        default_factory=list,
+        description="Optional list of explicit negations detected upstream."
     )
 
     class Config:

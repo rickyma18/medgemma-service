@@ -43,7 +43,8 @@ def full_structured_fields():
         plan_tratamiento="Paracetamol 500mg cada 8 horas",
         pronostico="Bueno para la vida",
         estudios_indicados="Ninguno",
-        notas_adicionales="Revisar en 3 dias"
+        notas_adicionales="Revisar en 3 dias",
+        negations=["niega fiebre", "sin alergias"]
     )
 
 @pytest.fixture
@@ -77,7 +78,8 @@ def test_root_keys_expected_shape(full_structured_fields):
         "planTratamiento",
         "pronostico",
         "estudiosIndicados",
-        "notasAdicionales"
+        "notasAdicionales",
+        "negations",
     }
     
     current_keys = set(dump.keys())
@@ -158,3 +160,9 @@ def test_nested_aliases(full_structured_fields):
     exploracion = dump["exploracionFisica"]
     assert "signosVitales" in exploracion
     assert "endoscopiaNasal" in exploracion
+
+
+def test_negations_accepts_list_of_strings():
+    model = StructuredFieldsV1(negations=["niega fiebre", "sin tos"])
+    dump = model.model_dump(by_alias=True, exclude_none=False)
+    assert dump["negations"] == ["niega fiebre", "sin tos"]

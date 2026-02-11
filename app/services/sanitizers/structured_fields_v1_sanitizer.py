@@ -181,4 +181,9 @@ def sanitize_structured_fields_v1(fields: StructuredFieldsV1) -> StructuredField
         pronostico=sanitize_string_field(fields.pronostico),
         estudiosIndicados=sanitize_string_field(fields.estudios_indicados),
         notasAdicionales=sanitize_string_field(fields.notas_adicionales),
+        negations=[
+            item for item in (
+                sanitize_string_field(v) for v in (fields.negations or [])
+            ) if item
+        ],
     )

@@ -152,6 +152,10 @@ class StructuredFieldsV1(BaseModel):
         alias="notasAdicionales",
         description="Citas de seguimiento, referencias, indicaciones especiales"
     )
+    negations: Optional[List[str]] = Field(
+        default_factory=list,
+        description="Lista de negaciones clínicas explícitas relevantes para el caso"
+    )
 
     class Config:
         populate_by_name = True

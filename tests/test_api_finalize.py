@@ -241,6 +241,23 @@ def test_finalize_both_structured_fields_prefers_new(client, mock_contracts, sam
     assert data["data"]["motivoConsulta"] != "Legacy motivo"
 
 
+def test_finalize_preserves_negations_field(client, mock_contracts, sample_fields):
+    """structuredFields.negations should pass through finalize response unchanged."""
+    mock_contracts.return_value = {"warnings": [], "details": None}
+
+    payload = {
+        "structuredFields": {
+            **sample_fields.model_dump(by_alias=True),
+            "negations": ["niega fiebre", "sin alergias"],
+        }
+    }
+
+    response = client.post("/v1/finalize", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["data"]["negations"] == ["niega fiebre", "sin alergias"]
+
+
 # --- Consistency check tests (Epic 6) ---
 
 def _make_transcript_payload(*texts: str) -> dict:

@@ -23,6 +23,7 @@ from app.schemas.finalize import FinalizeRequest, FinalizeResponse, FinalizeMeta
 from app.schemas.response import ErrorResponse, ErrorDetail, ResponseMetadata
 from app.schemas.structured_fields_v1 import StructuredFieldsV1
 from app.services.extractor import get_model_version
+from app.services.structured_v1_extractor import compute_extraction_meta
 
 # Reusing contract logic (No new logic invented)
 from app.contracts.contract_guard import check_contracts, get_contract_warnings
@@ -394,6 +395,10 @@ async def finalize_extraction(
                 original_fields, final_fields, transcript_text
             )
 
+        # Preserve upstream negations as first-class field in finalized output.
+        if original_fields.negations and not final_fields.negations:
+            final_fields.negations = list(original_fields.negations)
+
         # 2.5 Deterministic consistency check (no LLM)
         consistency_warnings: list = []
         if request_body.check_consistency:
@@ -414,6 +419,9 @@ async def finalize_extraction(
         evidence_list = None  # Future: extract from request or inference result
         used_evidence_bool = bool(evidence_list)
 
+        # Anti-sparse metadata (PHI-safe)
+        extraction_meta = compute_extraction_meta(final_fields)
+
         response = FinalizeResponse(
             success=True,
             data=final_fields,
@@ -429,7 +437,10 @@ async def finalize_extraction(
                 warnings=contract_warnings,  # Alias for contractWarnings
                 confidence_label=_compute_confidence_label(confidence_value),
                 used_evidence=used_evidence_bool,
-                evidence_list=evidence_list
+                evidence_list=evidence_list,
+                # Anti-sparse fields
+                has_content=extraction_meta["hasContent"],
+                negated_findings_count=extraction_meta["negatedFindingsCount"],
             )
         )
 

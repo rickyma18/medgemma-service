@@ -125,45 +125,79 @@ class TestPromptImpresion:
 # ---------------------------------------------------------------------------
 
 class TestFewShotShortTranscript:
-    """Few-shot examples injected when transcript < threshold."""
+    """Few-shot examples injected when short transcript AND scope is provided.
+    
+    NOTE: Few-shot examples are now scope-aware. They are only injected when:
+    1. transcript_len > 0 and < SHORT_TRANSCRIPT_THRESHOLD
+    2. scope is explicitly provided (e.g., "interview")
+    
+    Non-scoped extractions (full extraction) do not inject few-shot examples
+    because the main prompt already has comprehensive examples.
+    """
 
-    def test_short_transcript_has_fewshot(self):
-        prompt = _build_v1_system_prompt(transcript_len=100)
+    def test_short_transcript_interview_has_fewshot(self):
+        """Short transcript with interview scope gets few-shot examples."""
+        prompt = _build_v1_system_prompt(scope="interview", transcript_len=100)
         assert "EJEMPLOS PARA TRANSCRIPTS CORTOS" in prompt
 
+    def test_short_transcript_no_scope_no_fewshot(self):
+        """Short transcript WITHOUT scope does NOT get scope-specific few-shot."""
+        prompt = _build_v1_system_prompt(transcript_len=100)
+        # Non-scoped extractions rely on the comprehensive base prompt
+        assert "EJEMPLOS PARA TRANSCRIPTS CORTOS – INTERVIEW" not in prompt
+
     def test_long_transcript_no_fewshot(self):
-        prompt = _build_v1_system_prompt(transcript_len=200)
+        prompt = _build_v1_system_prompt(scope="interview", transcript_len=200)
         assert "EJEMPLOS PARA TRANSCRIPTS CORTOS" not in prompt
 
     def test_exact_threshold_no_fewshot(self):
-        prompt = _build_v1_system_prompt(transcript_len=SHORT_TRANSCRIPT_THRESHOLD)
+        prompt = _build_v1_system_prompt(scope="interview", transcript_len=SHORT_TRANSCRIPT_THRESHOLD)
         assert "EJEMPLOS PARA TRANSCRIPTS CORTOS" not in prompt
 
     def test_zero_len_no_fewshot(self):
         """Default (len=0) should not inject few-shot."""
-        prompt = _build_v1_system_prompt(transcript_len=0)
+        prompt = _build_v1_system_prompt(scope="interview", transcript_len=0)
         assert "EJEMPLOS PARA TRANSCRIPTS CORTOS" not in prompt
 
-    def test_fewshot_contains_negation_examples(self):
-        prompt = _build_v1_system_prompt(transcript_len=50)
+    def test_fewshot_interview_contains_negation_examples(self):
+        """Interview few-shot must contain negation routing examples."""
+        prompt = _build_v1_system_prompt(scope="interview", transcript_len=50)
         lower = prompt.lower()
         assert "niega alergias" in lower
         assert "niega tabaquismo" in lower
 
-    def test_fewshot_contains_heredofamiliares_example(self):
-        prompt = _build_v1_system_prompt(transcript_len=50)
-        assert "Padre con DM2" in prompt or "Madre con HTA" in prompt
+    def test_fewshot_interview_contains_heredofamiliares_example(self):
+        """Interview few-shot must contain family history examples."""
+        prompt = _build_v1_system_prompt(scope="interview", transcript_len=50)
+        # Updated to match new expanded medical terminology
+        assert "diabetes mellitus" in prompt.lower() or "hipertensión arterial" in prompt.lower()
 
-    def test_fewshot_nulls_for_missing_fields(self):
-        """Few-shot examples must show null for fields not in transcript."""
-        prompt = _build_v1_system_prompt(transcript_len=50)
+    def test_fewshot_interview_nulls_for_missing_fields(self):
+        """Interview few-shot examples must show null for fields not in transcript."""
+        prompt = _build_v1_system_prompt(scope="interview", transcript_len=50)
         # motivoConsulta should be null in short examples
         assert '"motivoConsulta": null' in prompt
         assert '"padecimientoActual": null' in prompt
 
+    def test_fewshot_interview_no_out_of_scope_fields(self):
+        """Interview few-shot must NOT contain out-of-scope fields.
+        
+        Test the few-shot function directly since the full prompt contains
+        all field names in schema documentation.
+        """
+        from app.services.structured_v1_extractor import _build_short_transcript_fewshot
+        fewshot = _build_short_transcript_fewshot("interview")
+        # These fields should NOT appear in interview few-shot examples
+        assert '"exploracionFisica"' not in fewshot
+        assert '"diagnostico"' not in fewshot
+        assert '"planTratamiento"' not in fewshot
+        assert '"pronostico"' not in fewshot
+        assert '"estudiosIndicados"' not in fewshot
+        assert '"notasAdicionales"' not in fewshot
+
     def test_fewshot_no_phi(self):
         """Few-shot examples must not contain real PHI."""
-        prompt = _build_v1_system_prompt(transcript_len=50)
+        prompt = _build_v1_system_prompt(scope="interview", transcript_len=50)
         # Check that no real names/dates/IDs appear
         # (Synthetic examples use generic terms)
         assert "Juan" not in prompt

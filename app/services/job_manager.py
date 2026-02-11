@@ -29,7 +29,7 @@ class Job:
     started_at: Optional[float] = None
     completed_at: Optional[float] = None
     result: Optional[Any] = None
-    error: Optional[str] = None
+    error: Optional[Dict[str, Any]] = None
     fallback_used: bool = False
     contract_warnings: List[str] = field(default_factory=list)
     
@@ -95,6 +95,46 @@ class JobManager:
 
         return self._jobs.get(job_id)
 
+    def _is_retryable_error(self, exc: Exception) -> bool:
+        return isinstance(exc, (TimeoutError, asyncio.TimeoutError, ConnectionError))
+
+    def normalize_job_error(self, error: Any) -> Optional[Dict[str, Any]]:
+        """
+        Normalize internal/legacy error values to API-safe error object.
+        Output shape: {code, message, details, retryable}
+        """
+        if error is None:
+            return None
+
+        if isinstance(error, dict):
+            message = str(error.get("message", "Job failed"))
+            code = str(error.get("code", "MODEL_ERROR"))
+            details = error.get("details")
+            retryable = bool(error.get("retryable", False))
+            return {
+                "code": code,
+                "message": message,
+                "details": details if isinstance(details, dict) or details is None else None,
+                "retryable": retryable,
+            }
+
+        if hasattr(error, "code") and hasattr(error, "message"):
+            details = getattr(error, "details", None)
+            return {
+                "code": str(getattr(error, "code", "MODEL_ERROR")),
+                "message": str(getattr(error, "message", "Job failed")),
+                "details": details if isinstance(details, dict) or details is None else None,
+                "retryable": bool(getattr(error, "retryable", False)),
+            }
+
+        # Legacy string/unknown shape
+        return {
+            "code": "MODEL_ERROR",
+            "message": str(error),
+            "details": None,
+            "retryable": False,
+        }
+
     async def submit_job(self, user_id: str, request: ExtractRequest) -> str:
         """
         Enqueues a new job if quotas allow.
@@ -124,11 +164,25 @@ class JobManager:
                 del self._user_active_jobs[user_id]
 
         # 2. Check Daily Quota
+        settings = get_settings()
+        dev_uids = {
+            uid.strip()
+            for uid in settings.quota_dev_uids.split(",")
+            if uid.strip()
+        }
+        quota_bypass = settings.bypass_quota or (user_id in dev_uids)
+
         today = date.today()
         user_counts = self._daily_counts.setdefault(user_id, {})
         current_count = user_counts.get(today, 0)
-        
-        if current_count >= self.max_daily_quota:
+
+        if quota_bypass:
+            logger.info(
+                "Quota bypass active",
+                quota_bypass=True,
+                user_id=user_id
+            )
+        elif current_count >= self.max_daily_quota:
             # Check if this user is a super admin or has overrides? 
             # For now, strict limit.
             raise RuntimeError("Daily quota exceeded")
@@ -255,7 +309,14 @@ class JobManager:
             
         except Exception as e:
             job.status = "failed"
-            job.error = str(e)
+            job.error = self.normalize_job_error(
+                {
+                    "code": "MODEL_ERROR",
+                    "message": str(e),
+                    "details": {"stage": "extract_structured_v1"},
+                    "retryable": self._is_retryable_error(e),
+                }
+            )
             self._metrics["failures"] += 1
             logger.error("Job failed", job_id=job_id, error_code="JOB_FAILED")
             

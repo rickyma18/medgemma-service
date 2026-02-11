@@ -36,6 +36,7 @@ SCOPE_ALLOWED_FIELDS: dict[str, set[str]] = {
         "motivoConsulta",
         "padecimientoActual",
         "antecedentes",  # includes all nested: heredofamiliares, personalesNoPatologicos, personalesPatologicos
+        "negations",
     },
     "exam": {
         "exploracionFisica",  # includes all nested: signosVitales, rinoscopia, orofaringe, cuello, etc.
@@ -56,20 +57,21 @@ SCOPE_ALLOWED_FIELDS: dict[str, set[str]] = {
 SHORT_TRANSCRIPT_THRESHOLD = 150
 
 
-def _build_short_transcript_fewshot() -> str:
+def _build_short_transcript_fewshot(scope: str | None = None) -> str:
     """
-    Few-shot examples for short transcripts (<150 chars).
+    Scope-aware few-shot examples for short transcripts (<150 chars).
 
-    Teaches the model to:
-    - Output null for fields not mentioned (no hallucination)
-    - Preserve pertinent negatives as data
-    - Route antecedentes to the correct subfield
+    Examples MUST strictly respect the active scope.
+    For scope=interview: only include interview fields (motivoConsulta, padecimientoActual, antecedentes).
+    No placeholders like '[sin diagnostico]', 'sin datos', 'no referido' are ever shown.
+    Fields outside the scope must NOT appear at all in the examples.
 
     PHI-safe: all examples are synthetic.
     """
-    return '''
+    if scope == "interview":
+        return '''
 
-## EJEMPLOS PARA TRANSCRIPTS CORTOS
+## EJEMPLOS PARA TRANSCRIPTS CORTOS – INTERVIEW
 
 ENTRADA: "Padre diabetico. Niega alergias."
 SALIDA:
@@ -77,19 +79,14 @@ SALIDA:
   "motivoConsulta": null,
   "padecimientoActual": null,
   "antecedentes": {
-    "heredofamiliares": "Padre con DM2",
+    "heredofamiliares": "Padre con diabetes mellitus",
     "personalesNoPatologicos": null,
     "personalesPatologicos": "Niega alergias"
   },
-  "exploracionFisica": {},
-  "diagnostico": {"texto": "[sin diagnostico por falta de datos clinicos]", "tipo": "sindromico", "cie10": null},
-  "planTratamiento": null,
-  "pronostico": null,
-  "estudiosIndicados": null,
-  "notasAdicionales": null
+  "negations": []
 }
 
-ENTRADA: "No fuma, no toma. Le hicieron circuncision a los 5 anos."
+ENTRADA: "No fuma, no toma. Circuncision a los 5 años."
 SALIDA:
 {
   "motivoConsulta": null,
@@ -97,33 +94,27 @@ SALIDA:
   "antecedentes": {
     "heredofamiliares": null,
     "personalesNoPatologicos": "Niega tabaquismo. Niega alcoholismo",
-    "personalesPatologicos": "Circuncision a los 5 anos"
+    "personalesPatologicos": "Circuncisión a los 5 años"
   },
-  "exploracionFisica": {},
-  "diagnostico": {"texto": "[sin diagnostico por falta de datos clinicos]", "tipo": "sindromico", "cie10": null},
-  "planTratamiento": null,
-  "pronostico": null,
-  "estudiosIndicados": null,
-  "notasAdicionales": null
+  "negations": []
 }
 
-ENTRADA: "Alergico a sulfas. Mama hipertensa."
+ENTRADA: "Alergico a sulfas. Madre hipertensa."
 SALIDA:
 {
   "motivoConsulta": null,
   "padecimientoActual": null,
   "antecedentes": {
-    "heredofamiliares": "Madre con HTA",
+    "heredofamiliares": "Madre con hipertensión arterial",
     "personalesNoPatologicos": null,
     "personalesPatologicos": "Alergia a sulfas"
   },
-  "exploracionFisica": {},
-  "diagnostico": {"texto": "[sin diagnostico por falta de datos clinicos]", "tipo": "sindromico", "cie10": null},
-  "planTratamiento": null,
-  "pronostico": null,
-  "estudiosIndicados": null,
-  "notasAdicionales": null
+  "negations": []
 }'''
+
+    # Fallback for non-scoped or other scopes: return empty (no few-shot needed)
+    # Full extraction has its own comprehensive examples in the base prompt.
+    return ""
 
 
 def _build_v1_system_prompt(
@@ -267,18 +258,89 @@ SALIDA:
 FORMATO:
 - Devuelve JSON valido EXACTAMENTE con el schema. No agregues texto afuera del JSON.'''
 
-    # FIX #5: Inject few-shot examples for short transcripts to prevent hallucination
+    # FIX #5: Inject scope-aware few-shot examples for short transcripts
     if 0 < transcript_len < SHORT_TRANSCRIPT_THRESHOLD:
-        base_prompt += _build_short_transcript_fewshot()
+        base_prompt += _build_short_transcript_fewshot(scope)
 
     # Add scope instruction if provided
     if scope:
         scope_instructions = {
-            "interview": "SCOPE: Solo extrae motivoConsulta, padecimientoActual y antecedentes. Deja el resto como null.",
-            "exam": "SCOPE: Solo extrae exploracionFisica (todos sus subcampos). Deja el resto como null.",
-            "studies": "SCOPE: Solo extrae estudiosIndicados. Deja el resto como null.",
-            "assessment": "SCOPE: Solo extrae diagnostico, planTratamiento y pronostico. Deja el resto como null.",
+        "interview": (
+            "SCOPE: PASO = INTERVIEW (anamnesis). Extrae ÚNICAMENTE y SOLO estos campos. Deja TODO lo demás como null/{}:\n"
+            "1) motivoConsulta\n"
+            "2) padecimientoActual\n"
+            "3) antecedentes.heredofamiliares\n"
+            "4) antecedentes.personalesNoPatologicos\n"
+            "5) antecedentes.personalesPatologicos\n"
+            "\n"
+            "REGLAS:\n"
+            "- Si el transcript menciona CUALQUIER dato de estos campos, extráelo aunque sea mínimo.\n"
+            "- Convierte negaciones ('niega', 'sin', 'no') en texto clínico útil dentro del campo correcto.\n"
+            "- No inventes información.\n"
+            "- Prohibido placeholders: 'sin datos', 'no refiere', 'N/A', '-', 'pendiente'. Si no hay info, usa null.\n"
+            "- Responde SOLO JSON válido con este shape EXACTO:\n"
+            "{\n"
+            "  \"motivoConsulta\": string|null,\n"
+            "  \"padecimientoActual\": string|null,\n"
+            "  \"antecedentes\": {\n"
+            "    \"heredofamiliares\": string|null,\n"
+            "    \"personalesNoPatologicos\": string|null,\n"
+            "    \"personalesPatologicos\": string|null\n"
+            "  },\n"
+            "  \"negations\": []\n"
+            "}\n"
+        ),
+
+        "exam": (
+            "SCOPE: PASO = EXAM (exploración física). Extrae ÚNICAMENTE exploracionFisica (con todos sus subcampos). "
+            "Deja TODO lo demás como null/{}.\n"
+            "\n"
+            "REGLAS:\n"
+            "- Incluye signosVitales si aparecen (TA/FC/FR/T/SpO2), si no: null.\n"
+            "- No inventes hallazgos.\n"
+            "- Prohibido placeholders (sin datos/no refiere/N/A). Si no hay info, usa null.\n"
+            "- Responde SOLO JSON válido con este shape EXACTO:\n"
+            "{\n"
+            "  \"exploracionFisica\": object,\n"
+            "  \"negations\": []\n"
+            "}\n"
+        ),
+
+        "studies": (
+            "SCOPE: PASO = STUDIES (estudios/indicaciones). Extrae ÚNICAMENTE estudiosIndicados. "
+            "Deja TODO lo demás como null/{}.\n"
+            "\n"
+            "REGLAS:\n"
+            "- Si hay estudios mencionados (labs, imagen, gabinete), listalos tal cual en estudiosIndicados.\n"
+            "- No inventes estudios.\n"
+            "- Prohibido placeholders (sin datos/no refiere/N/A). Si no hay info, usa null.\n"
+            "- Responde SOLO JSON válido con este shape EXACTO:\n"
+            "{\n"
+            "  \"estudiosIndicados\": string|null,\n"
+            "  \"negations\": []\n"
+            "}\n"
+        ),
+
+        "assessment": (
+            "SCOPE: PASO = ASSESSMENT (cierre clínico). Extrae ÚNICAMENTE:\n"
+            "- diagnostico\n"
+            "- planTratamiento\n"
+            "- pronostico\n"
+            "Deja TODO lo demás como null/{}.\n"
+            "\n"
+            "REGLAS:\n"
+            "- NO inventes diagnósticos ni tratamientos. Si no están en el transcript, usa null.\n"
+            "- Prohibido placeholders (sin datos/no refiere/N/A). Si no hay info, usa null.\n"
+            "- Responde SOLO JSON válido con este shape EXACTO:\n"
+            "{\n"
+            "  \"diagnostico\": string|null,\n"
+            "  \"planTratamiento\": string|null,\n"
+            "  \"pronostico\": string|null,\n"
+            "  \"negations\": []\n"
+            "}\n"
+        ),
         }
+
         if scope in scope_instructions:
             base_prompt += f"\n\n{scope_instructions[scope]}"
 
@@ -298,6 +360,36 @@ def _is_effectively_empty(value) -> bool:
     if isinstance(value, list) and len(value) == 0:
         return True
     return False
+
+
+def compute_extraction_meta(fields: StructuredFieldsV1) -> dict:
+    """
+    Compute PHI-safe extraction metadata for client sparse-detection.
+
+    Returns a dict with:
+        hasContent (bool): True if any clinical field is non-null or negations non-empty.
+        negatedFindingsCount (int): Number of items in negations list.
+
+    This is safe to include in API responses (no PHI, only booleans/counts).
+    """
+    negations = fields.negations or []
+    negated_count = len(negations)
+
+    has_content = (
+        fields.motivo_consulta is not None
+        or fields.padecimiento_actual is not None
+        or (fields.antecedentes is not None and (
+            fields.antecedentes.heredofamiliares is not None
+            or fields.antecedentes.personales_no_patologicos is not None
+            or fields.antecedentes.personales_patologicos is not None
+        ))
+        or negated_count > 0
+    )
+
+    return {
+        "hasContent": has_content,
+        "negatedFindingsCount": negated_count,
+    }
 
 
 def _apply_scope_mask(data: dict, scope: str) -> dict:
@@ -329,25 +421,152 @@ def _apply_scope_mask(data: dict, scope: str) -> dict:
         "pronostico",
         "estudiosIndicados",
         "notasAdicionales",
+        "negations",
     }
 
     # Dict-typed fields get {} instead of None when empty
     dict_fields = {"antecedentes", "exploracionFisica"}
+    list_fields = {"negations"}
 
     masked = {}
     for field in all_fields:
-        value = data.get(field)
+        if field in list_fields:
+            value = data.get(field, [])
+        else:
+            value = data.get(field)
         if field in allowed:
             # In-scope: always keep as-is
             masked[field] = value
         else:
             # Out-of-scope: keep if non-empty, normalize if empty
             if _is_effectively_empty(value):
-                masked[field] = {} if field in dict_fields else None
+                if field in dict_fields:
+                    masked[field] = {}
+                elif field in list_fields:
+                    masked[field] = []
+                else:
+                    masked[field] = None
             else:
                 masked[field] = value
 
     return masked
+
+
+def _merge_negations_into_antecedentes(data: dict, scope: str | None) -> dict:
+    """
+    Merge negations into appropriate antecedentes subfields for interview scope.
+
+    For scope="interview", negations should not remain as a standalone top-level field.
+    Instead, they are routed to the correct antecedentes subfield based on content:
+
+    1. Habits (fuma, alcohol, drogas, tabaco) → personalesNoPatologicos
+    2. Allergies, diseases, surgeries, conditions → personalesPatologicos
+    3. Family relations + disease (padre, madre, hermano + diabetes, HTA) → heredofamiliares
+
+    Args:
+        data: The repaired dict from _repair_v1_dict
+        scope: The extraction scope
+
+    Returns:
+        Dict with negations merged into antecedentes (only for interview scope)
+
+    PHI-safe: No logging of content.
+    """
+    # Only apply for interview scope
+    if scope != "interview":
+        return data
+
+    negations = data.get("negations", [])
+    if not negations or not isinstance(negations, list):
+        return data
+
+    # Ensure antecedentes exists
+    antecedentes = data.get("antecedentes", {})
+    if not isinstance(antecedentes, dict):
+        antecedentes = {}
+
+    heredofam = antecedentes.get("heredofamiliares") or ""
+    apnp = antecedentes.get("personalesNoPatologicos") or ""
+    app = antecedentes.get("personalesPatologicos") or ""
+
+    # Keyword sets for routing (case-insensitive matching)
+    # Habits → personalesNoPatologicos
+    habit_keywords = {
+        "fuma", "fumar", "tabaco", "tabaquismo", "cigarro", "cigarrillo",
+        "alcohol", "alcoholismo", "toma", "bebe", "bebedor",
+        "droga", "drogas", "toxicomanía", "toxicomania", "marihuana", "cocaína", "cocaina",
+        "mascota", "mascotas", "perro", "gato", "animales",
+    }
+
+    # Allergies, diseases, surgeries → personalesPatologicos
+    patologicos_keywords = {
+        "alergia", "alergias", "alérgico", "alergico", "alérgica", "alergica",
+        "diabetes", "diabético", "diabetico", "dm", "dm2",
+        "hipertensión", "hipertension", "hta", "hipertenso", "hipertensa",
+        "asma", "asmático", "asmatico",
+        "cirugía", "cirugia", "cirugías", "cirugias", "operación", "operacion",
+        "enfermedad", "enfermedades", "patología", "patologia",
+        "medicamento", "medicamentos", "fármaco", "farmaco",
+        "transfusión", "transfusion", "hospitalización", "hospitalizacion",
+        "cáncer", "cancer", "tumor",
+    }
+
+    # Family relations → heredofamiliares (need relation + disease)
+    family_keywords = {
+        "padre", "papá", "papa", "madre", "mamá", "mama",
+        "hermano", "hermana", "abuelo", "abuela",
+        "tío", "tio", "tía", "tia", "primo", "prima",
+        "familia", "familiar", "familiares", "heredo",
+    }
+
+    routed_to_apnp = []
+    routed_to_app = []
+    routed_to_heredofam = []
+
+    for neg in negations:
+        if not isinstance(neg, str) or not neg.strip():
+            continue
+
+        neg_lower = neg.lower()
+
+        # Check for family relation + disease patterns
+        has_family = any(kw in neg_lower for kw in family_keywords)
+        has_disease = any(kw in neg_lower for kw in patologicos_keywords)
+
+        if has_family and has_disease:
+            routed_to_heredofam.append(neg.strip())
+        elif any(kw in neg_lower for kw in habit_keywords):
+            routed_to_apnp.append(neg.strip())
+        elif any(kw in neg_lower for kw in patologicos_keywords):
+            routed_to_app.append(neg.strip())
+        else:
+            # Default: route to personalesPatologicos (most common for negations)
+            routed_to_app.append(neg.strip())
+
+    # Merge routed negations into existing fields
+    if routed_to_heredofam:
+        new_text = ". ".join(routed_to_heredofam)
+        heredofam = f"{heredofam}. {new_text}".strip(". ") if heredofam else new_text
+
+    if routed_to_apnp:
+        new_text = ". ".join(routed_to_apnp)
+        apnp = f"{apnp}. {new_text}".strip(". ") if apnp else new_text
+
+    if routed_to_app:
+        new_text = ". ".join(routed_to_app)
+        app = f"{app}. {new_text}".strip(". ") if app else new_text
+
+    # Update antecedentes
+    antecedentes["heredofamiliares"] = heredofam if heredofam else None
+    antecedentes["personalesNoPatologicos"] = apnp if apnp else None
+    antecedentes["personalesPatologicos"] = app if app else None
+
+    data["antecedentes"] = antecedentes
+
+    # Clear negations after merging (for interview scope only)
+    data["negations"] = []
+
+    return data
 
 
 def _build_v1_user_prompt(transcript: Transcript, context: Optional[Context]) -> str:
@@ -417,6 +636,7 @@ def _repair_v1_dict(data: dict) -> dict:
         "estudios": "estudiosIndicados",
         "notas_adicionales": "notasAdicionales",
         "notas": "notasAdicionales",
+        "negaciones": "negations",
         # Antecedentes
         "antecedentes_heredofamiliares": "heredofamiliares",
         "heredoFamiliares": "heredofamiliares",
@@ -448,6 +668,7 @@ def _repair_v1_dict(data: dict) -> dict:
     # Asegurar estructuras requeridas
     data.setdefault("antecedentes", {})
     data.setdefault("exploracionFisica", {})
+    data.setdefault("negations", [])
 
     # Limpiar valores placeholder a null
     placeholder_values = {
@@ -530,6 +751,9 @@ def _parse_v1_output(output: str, scope: str | None = None) -> StructuredFieldsV
 
     try:
         repaired = _repair_v1_dict(data)
+
+        # Merge negations into antecedentes for interview scope (before scope mask)
+        repaired = _merge_negations_into_antecedentes(repaired, scope)
 
         # Apply scope mask POST-repair to prevent LLM contamination
         if scope:
@@ -667,6 +891,21 @@ async def extract_structured_v1(
 
     # 2. Post-procesamiento deterministico (Cuello <-> Orofaringe)
     fields = postprocess_orl_mapping(fields)
+
+    # Propagate upstream negations from context when provided.
+    if context and context.negations:
+        upstream_negations = [n for n in context.negations if isinstance(n, str) and n.strip()]
+        fields.negations = upstream_negations
+
+        # For interview scope, merge context negations into antecedentes
+        # so clients see populated antecedentes fields (prevents false sparse).
+        if scope == "interview" and upstream_negations:
+            data_dict = fields.model_dump(by_alias=True)
+            data_dict["negations"] = upstream_negations
+            data_dict = _merge_negations_into_antecedentes(data_dict, scope)
+            # Restore negations (merge clears them); keep in response for clients.
+            data_dict["negations"] = upstream_negations
+            fields = StructuredFieldsV1.model_validate(data_dict)
 
     # Calcular tiempo de inferencia
     inference_ms = int((time.perf_counter() - start_time) * 1000)

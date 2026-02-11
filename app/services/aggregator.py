@@ -47,6 +47,24 @@ def _merge_str_fields(values: List[str]) -> Optional[str]:
         return None
     return SEPARATOR.join(unique)
 
+
+def _merge_list_str_fields(values: List[List[str]]) -> List[str]:
+    """Combina listas de strings, deduplicando y preservando orden."""
+    merged: List[str] = []
+    seen = set()
+    for group in values:
+        if not group:
+            continue
+        for item in group:
+            if not item or not isinstance(item, str):
+                continue
+            norm = _normalize_str(item)
+            if not norm or norm in seen:
+                continue
+            seen.add(norm)
+            merged.append(item.strip())
+    return merged
+
 def _merge_exploracion(items: List[ExploracionFisica]) -> ExploracionFisica:
     """Merge de sub-objeto ExploracionFisica."""
     # Como todos son strings opcionales, usamos _merge_str_fields para cada campo
@@ -130,6 +148,7 @@ def aggregate_structured_fields_v1(results: List[StructuredFieldsV1]) -> Structu
     pronosticos = [r.pronostico for r in results]
     estudios = [r.estudios_indicados for r in results]
     notas = [r.notas_adicionales for r in results]
+    negations = [r.negations or [] for r in results]
     
     merged = StructuredFieldsV1(
         motivoConsulta=_merge_str_fields(motivos),
@@ -140,7 +159,8 @@ def aggregate_structured_fields_v1(results: List[StructuredFieldsV1]) -> Structu
         planTratamiento=_merge_str_fields(planes),
         pronostico=_merge_str_fields(pronosticos),
         estudiosIndicados=_merge_str_fields(estudios),
-        notasAdicionales=_merge_str_fields(notas)
+        notasAdicionales=_merge_str_fields(notas),
+        negations=_merge_list_str_fields(negations),
     )
 
     return merged

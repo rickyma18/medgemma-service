@@ -1,4 +1,4 @@
-from typing import Any, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -11,6 +11,13 @@ class JobSubmissionResponse(BaseModel):
     etaSeconds: Optional[int] = None
 
 
+class JobError(BaseModel):
+    code: str
+    message: str
+    details: Optional[Dict[str, Any]] = None
+    retryable: bool = False
+
+
 class JobStatusResponse(BaseModel):
     success: bool = True
     jobId: str
@@ -20,6 +27,6 @@ class JobStatusResponse(BaseModel):
     fallbackUsed: bool = False
     contractWarnings: List[str] = Field(default_factory=list)
     result: Optional[Any] = None
-    
-    # Error message if failed (PHI safe generic message usually, or specific error code)
-    error: Optional[str] = None
+    error: Optional[JobError] = None
+    # Optional backward-compat string for legacy clients.
+    errorMessage: Optional[str] = None

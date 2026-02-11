@@ -9,7 +9,9 @@ from app.core.config import get_settings
 from app.core.logging import get_safe_logger
 from app.schemas.request import ExtractRequest
 from app.schemas.job import JobStatusResponse, JobSubmissionResponse
+from app.schemas.structured_fields_v1 import StructuredFieldsV1
 from app.services.job_manager import JobManager
+from app.services.structured_v1_extractor import compute_extraction_meta
 
 router = APIRouter(prefix="/v1", tags=["jobs"], dependencies=[Depends(verify_auth_header)])
 metrics_router = APIRouter(prefix="/v1", tags=["jobs"])
@@ -231,6 +233,8 @@ async def get_job_status(
     position = None
     eta = None
     result = None
+    normalized_error = job_manager.normalize_job_error(job.error)
+    error_message = normalized_error["message"] if normalized_error else None
     
     if job.status == "queued":
         position = job_manager.get_queue_position(job_id)
@@ -239,7 +243,15 @@ async def get_job_status(
     
     elif job.status == "done":
         # Only return result if done
-        result = job.result
+        if isinstance(job.result, StructuredFieldsV1):
+            result = {
+                "structuredFields": job.result.model_dump(by_alias=True, exclude_none=False),
+                "extractionMeta": compute_extraction_meta(job.result),
+            }
+        elif isinstance(job.result, dict) and "structuredFields" in job.result:
+            result = job.result
+        else:
+            result = job.result
         
     return JobStatusResponse(
         success=True,
@@ -250,5 +262,6 @@ async def get_job_status(
         fallbackUsed=job.fallback_used,
         contractWarnings=job.contract_warnings,
         result=result,
-        error=job.error
+        error=normalized_error,
+        errorMessage=error_message
     )

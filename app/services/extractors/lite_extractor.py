@@ -329,6 +329,10 @@ async def extract_chunk_lite(
     # Parse and validate output
     fields = _parse_lite_output(model_output)
 
+    # Propagate upstream negations from context when provided.
+    if context and context.negations:
+        fields.negations = [n for n in context.negations if isinstance(n, str) and n.strip()]
+
     # Extract evidence (PHI-safe: sanitized)
     evidence = _extract_evidence_from_fields(
         fields,

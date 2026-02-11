@@ -123,6 +123,18 @@ class FinalizeMetadata(BaseModel):
         description="Raw evidence snippets (if available). usedEvidence is derived from this."
     )
 
+    # Anti-sparse metadata (PHI-safe booleans/counts)
+    has_content: bool = Field(
+        default=True,
+        alias="hasContent",
+        description="[Anti-sparse] True if extraction has any useful clinical content (fields or negations)."
+    )
+    negated_findings_count: int = Field(
+        default=0,
+        alias="negatedFindingsCount",
+        description="[Anti-sparse] Number of negated findings in the extraction."
+    )
+
     class Config:
         populate_by_name = True
 

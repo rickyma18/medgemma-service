@@ -173,6 +173,14 @@ class Settings(BaseSettings):
         le=100,
         description="Daily job quota per user"
     )
+    bypass_quota: bool = Field(
+        default=False,
+        description="DEV ONLY: bypass daily job quota checks"
+    )
+    quota_dev_uids: str = Field(
+        default="",
+        description="DEV ONLY: comma-separated user IDs allowed to bypass quota"
+    )
 
     admin_api_key: Optional[str] = Field(
         default=None,
