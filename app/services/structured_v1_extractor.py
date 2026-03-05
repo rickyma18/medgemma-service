@@ -5,6 +5,7 @@ Uses OpenAI-compatible API (MedGemma/vLLM).
 PHI-safe: NEVER log transcript, prompt, or model output.
 """
 import json
+import re
 import time
 from typing import Optional
 
@@ -55,6 +56,8 @@ SCOPE_ALLOWED_FIELDS: dict[str, set[str]] = {
 # FIX #5: Threshold below which few-shot examples are injected
 # to prevent hallucination on sparse/short transcripts.
 SHORT_TRANSCRIPT_THRESHOLD = 150
+# Interview scope benefits from examples at higher thresholds (smaller model).
+SHORT_TRANSCRIPT_THRESHOLD_INTERVIEW = 400
 
 
 def _build_short_transcript_fewshot(scope: str | None = None) -> str:
@@ -93,7 +96,7 @@ SALIDA:
   "padecimientoActual": null,
   "antecedentes": {
     "heredofamiliares": null,
-    "personalesNoPatologicos": "Niega tabaquismo. Niega alcoholismo",
+    "personalesNoPatologicos": "No fuma. No toma alcohol",
     "personalesPatologicos": "Circuncisión a los 5 años"
   },
   "negations": []
@@ -108,6 +111,32 @@ SALIDA:
     "heredofamiliares": "Madre con hipertensión arterial",
     "personalesNoPatologicos": null,
     "personalesPatologicos": "Alergia a sulfas"
+  },
+  "negations": []
+}
+
+ENTRADA: "No fumo, no tomo alcohol. Me operaron de apéndice hace 5 años. No tengo diabetes ni hipertensión."
+SALIDA:
+{
+  "motivoConsulta": null,
+  "padecimientoActual": null,
+  "antecedentes": {
+    "heredofamiliares": null,
+    "personalesNoPatologicos": "No fuma. No toma alcohol",
+    "personalesPatologicos": "Apendicectomía hace 5 años. Niega diabetes. Niega hipertensión"
+  },
+  "negations": []
+}
+
+ENTRADA: "Colesistectomía hace 8 años. Niega alergias."
+SALIDA:
+{
+  "motivoConsulta": null,
+  "padecimientoActual": null,
+  "antecedentes": {
+    "heredofamiliares": null,
+    "personalesNoPatologicos": null,
+    "personalesPatologicos": "Colecistectomía hace 8 años. Niega alergias"
   },
   "negations": []
 }'''
@@ -173,7 +202,7 @@ MISION: EXTRAER informacion del transcript a JSON. NO REDACTAR. NO INFERIR. NO I
 4. "impresion" o "impresion diagnostica" = diagnostico (NO confundir con depresion ni estado de animo)
 
 ## MAPEO DE CAMPOS
-- motivoConsulta: queja principal, 3-15 palabras. SOLO si el paciente/medico dice explicitamente por que viene.
+- motivoConsulta: queja principal, 1-2 oraciones cortas completas. Nunca cortar a mitad de frase. Si termina en preposicion (de/del/con/y) o numero suelto, reescribir como frase completa. SOLO si el paciente/medico dice explicitamente por que viene.
 - padecimientoActual: cronologia de sintomas (inicio, evolucion, intensidad). 1-4 oraciones.
 - antecedentes.heredofamiliares: enfermedades de familiares directos. Ej: "Padre con DM2".
 - antecedentes.personalesNoPatologicos: habitos y negativos pertinentes. Ej: "Niega tabaquismo, niega alcoholismo".
@@ -181,7 +210,7 @@ MISION: EXTRAER informacion del transcript a JSON. NO REDACTAR. NO INFERIR. NO I
 
 ## SCHEMA
 {
-  "motivoConsulta": "string 3-15 palabras | null",
+  "motivoConsulta": "string 1-2 oraciones cortas completas | null",
   "padecimientoActual": "narrativa 1-4 oraciones | null",
   "antecedentes": {
     "heredofamiliares": "enfermedades en familia | null",
@@ -259,7 +288,9 @@ FORMATO:
 - Devuelve JSON valido EXACTAMENTE con el schema. No agregues texto afuera del JSON.'''
 
     # FIX #5: Inject scope-aware few-shot examples for short transcripts
-    if 0 < transcript_len < SHORT_TRANSCRIPT_THRESHOLD:
+    # Interview scope uses a higher threshold because MedGemma benefits more from examples.
+    effective_threshold = SHORT_TRANSCRIPT_THRESHOLD_INTERVIEW if scope == "interview" else SHORT_TRANSCRIPT_THRESHOLD
+    if 0 < transcript_len < effective_threshold:
         base_prompt += _build_short_transcript_fewshot(scope)
 
     # Add scope instruction if provided
@@ -272,12 +303,36 @@ FORMATO:
             "3) antecedentes.heredofamiliares\n"
             "4) antecedentes.personalesNoPatologicos\n"
             "5) antecedentes.personalesPatologicos\n"
+            "6) negations\n"
+            "\n"
+            "SIGNIFICADO DE CAMPOS DE ANTECEDENTES:\n"
+            "- personalesNoPatologicos: SOLO hábitos (tabaco, alcohol, drogas, mascotas, vivienda, ocupación).\n"
+            "- personalesPatologicos: SOLO antecedentes médicos crónicos/enfermedades previas + alergias + cirugías.\n"
+            "- heredofamiliares: enfermedades de familiares directos.\n"
+            "- PROHIBIDO colocar síntomas en antecedentes. Los síntomas (fiebre, tos, disnea, dolor, rinorrea, nausea, diarrea, cefalea, odinofagia, etc.) NO van en ningún campo de antecedentes. Si son clínicamente relevantes van en padecimientoActual; si fueron negados, pueden ir a negations[] pero NUNCA a antecedentes.\n"
             "\n"
             "REGLAS:\n"
             "- Si el transcript menciona CUALQUIER dato de estos campos, extráelo aunque sea mínimo.\n"
-            "- Convierte negaciones ('niega', 'sin', 'no') en texto clínico útil dentro del campo correcto.\n"
+            "- Convierte negaciones en texto clínico útil dentro del campo correcto.\n"
+            "- Cada hallazgo o negación va en ORACIÓN SEPARADA terminada en punto.\n"
+            "- Formato de negaciones de ENFERMEDADES: usar 'Niega …' (Ej: 'Niega diabetes. Niega hipertensión.').\n"
+            "- Formato de negaciones de HÁBITOS: usar 'No …' (Ej: 'No fuma. No toma alcohol.').\n"
+            "- Cirugías e intervenciones quirúrgicas → personalesPatologicos.\n"
+            "  Incluye variantes ortográficas: colecistectomía/colesistectomía, apendicectomía,\n"
+            "  amigdalectomía, circuncisión, histerectomía, cesárea, hernioplastía,\n"
+            "  y frases genéricas como 'me operaron', 'cirugía previa'.\n"
+            "  Ejemplo: 'colesistectomía hace 8 años' → personalesPatologicos: 'Colecistectomía hace 8 años.'\n"
+            "- motivoConsulta: 1-2 oraciones cortas COMPLETAS. NUNCA cortar a mitad de frase. Si termina en 'de/del/con/y' o número suelto, reescribir como frase completa.\n"
             "- No inventes información.\n"
             "- Prohibido placeholders: 'sin datos', 'no refiere', 'N/A', '-', 'pendiente'. Si no hay info, usa null.\n"
+            "\n"
+            "REGLAS DE negations[]:\n"
+            "- negations es una lista de strings. Cada elemento debe ser UN concepto limpio y atómico.\n"
+            "- PROHIBIDO conjunciones colgantes: nunca terminar un item con 'ni', 'y', 'e', 'o'. Ejemplo: si el paciente dice 'no fuma ni toma alcohol', negations debe ser [\"fuma\", \"toma alcohol\"], NUNCA [\"fuma ni\"].\n"
+            "- PROHIBIDO fragmentos de puntuación, preposiciones sueltas o conectores.\n"
+            "- negations[] debe incluir SOLO items negados que NO estén ya claramente capturados en campos de antecedentes (evitar duplicación).\n"
+            "- Nunca inventar items; sin placeholders.\n"
+            "\n"
             "- Responde SOLO JSON válido con este shape EXACTO:\n"
             "{\n"
             "  \"motivoConsulta\": string|null,\n"
@@ -362,12 +417,15 @@ def _is_effectively_empty(value) -> bool:
     return False
 
 
-def compute_extraction_meta(fields: StructuredFieldsV1) -> dict:
+def compute_extraction_meta(fields: StructuredFieldsV1, scope: str | None = None) -> dict:
     """
     Compute PHI-safe extraction metadata for client sparse-detection.
 
+    Scope-aware: when scope is provided, only checks fields relevant to that scope.
+    For interview: motivoConsulta, padecimientoActual, antecedentes, negations.
+
     Returns a dict with:
-        hasContent (bool): True if any clinical field is non-null or negations non-empty.
+        hasContent (bool): True if any in-scope clinical field is non-null or negations non-empty.
         negatedFindingsCount (int): Number of items in negations list.
 
     This is safe to include in API responses (no PHI, only booleans/counts).
@@ -375,16 +433,44 @@ def compute_extraction_meta(fields: StructuredFieldsV1) -> dict:
     negations = fields.negations or []
     negated_count = len(negations)
 
-    has_content = (
-        fields.motivo_consulta is not None
-        or fields.padecimiento_actual is not None
-        or (fields.antecedentes is not None and (
-            fields.antecedentes.heredofamiliares is not None
-            or fields.antecedentes.personales_no_patologicos is not None
-            or fields.antecedentes.personales_patologicos is not None
-        ))
-        or negated_count > 0
-    )
+    if scope == "interview":
+        # Interview scope: check only anamnesis fields
+        has_content = (
+            fields.motivo_consulta is not None
+            or fields.padecimiento_actual is not None
+            or (fields.antecedentes is not None and (
+                fields.antecedentes.heredofamiliares is not None
+                or fields.antecedentes.personales_no_patologicos is not None
+                or fields.antecedentes.personales_patologicos is not None
+            ))
+            or negated_count > 0
+        )
+    elif scope == "exam":
+        has_content = fields.exploracion_fisica is not None and (
+            fields.exploracion_fisica.otoscopia is not None
+            or fields.exploracion_fisica.rinoscopia is not None
+            or fields.exploracion_fisica.orofaringe is not None
+            or fields.exploracion_fisica.cuello is not None
+            or fields.exploracion_fisica.signos_vitales is not None
+        )
+    elif scope == "assessment":
+        has_content = (
+            fields.diagnostico is not None
+            or fields.plan_tratamiento is not None
+            or fields.pronostico is not None
+        )
+    else:
+        # Full extraction or unknown scope: check all
+        has_content = (
+            fields.motivo_consulta is not None
+            or fields.padecimiento_actual is not None
+            or (fields.antecedentes is not None and (
+                fields.antecedentes.heredofamiliares is not None
+                or fields.antecedentes.personales_no_patologicos is not None
+                or fields.antecedentes.personales_patologicos is not None
+            ))
+            or negated_count > 0
+        )
 
     return {
         "hasContent": has_content,
@@ -394,19 +480,18 @@ def compute_extraction_meta(fields: StructuredFieldsV1) -> dict:
 
 def _apply_scope_mask(data: dict, scope: str) -> dict:
     """
-    Non-destructive scope mask applied POST-LLM.
+    Strict scope mask applied POST-LLM.
 
-    In-scope fields are always preserved as-is. Out-of-scope fields are
-    kept when they contain actual data (cross-scope "bonus" data the LLM
-    extracted from the transcript), but normalized to null/{} when empty.
+    In-scope fields are preserved as-is. Out-of-scope fields are ALWAYS
+    nulled/emptied regardless of content — the backend enforces that each
+    scope produces ONLY its own fields, so the client never has to trim.
 
     Args:
         data: The repaired dict from _repair_v1_dict
         scope: The extraction scope (interview, exam, studies, assessment)
 
     Returns:
-        Dict with scoped fields preserved; out-of-scope fields preserved
-        only when non-empty, otherwise normalized to null/{}.
+        Dict with in-scope fields preserved; out-of-scope fields strictly null/empty.
     """
     allowed = SCOPE_ALLOWED_FIELDS.get(scope, set())
 
@@ -424,32 +509,559 @@ def _apply_scope_mask(data: dict, scope: str) -> dict:
         "negations",
     }
 
-    # Dict-typed fields get {} instead of None when empty
-    dict_fields = {"antecedentes", "exploracionFisica"}
     list_fields = {"negations"}
 
     masked = {}
     for field in all_fields:
-        if field in list_fields:
-            value = data.get(field, [])
-        else:
-            value = data.get(field)
         if field in allowed:
             # In-scope: always keep as-is
-            masked[field] = value
-        else:
-            # Out-of-scope: keep if non-empty, normalize if empty
-            if _is_effectively_empty(value):
-                if field in dict_fields:
-                    masked[field] = {}
-                elif field in list_fields:
-                    masked[field] = []
-                else:
-                    masked[field] = None
+            if field in list_fields:
+                masked[field] = data.get(field, [])
             else:
-                masked[field] = value
+                masked[field] = data.get(field)
+        else:
+            # Out-of-scope: strictly null (no cross-scope leaking)
+            if field in list_fields:
+                masked[field] = []
+            else:
+                masked[field] = None
 
     return masked
+
+
+# ── Interview postprocess: reroute misplaced antecedentes from padecimientoActual ──
+
+_HABIT_KEYWORDS_PA = {
+    "fuma", "fumar", "tabaco", "tabaquismo", "cigarro",
+    "alcohol", "alcoholismo", "bebe",
+    "droga", "drogas", "toxicomania", "toxicomanía",
+    "mascota", "mascotas",
+}
+
+_SURGERY_KEYWORDS_PA = [
+    "apendicectom", "apendisectom", "amigdalectom",
+    "cirugía", "cirugia", "cirugía previa", "cirugia previa",
+    "operad", "operaci", "operaron", "operó", "opero", "me operaron",
+    "circuncis",
+    "colecistectom", "colesistectom", "colecistectomía", "colesistectomía",
+    "histerectom", "histerectomía", "histerectomia",
+    "cesárea", "cesarea", "hernioplast", "hernioplastía", "hernioplastia",
+    "artroscop", "artroscopía", "artroscopia",
+    "tiroidectom", "mastectom", "prostatectom", "nefrectom",
+    # ORL-specific
+    "rinoplast",        # rinoplastia (cirugía nasal)
+    "septoplast",       # septoplastia (corrección de septum)
+    "turbinoplast",     # turbinoplastia
+    "timpanoplast",     # timpanoplastia (cirugía de oído)
+    "adenoidectom",     # adenoidectomía
+    "traqueotom",       # traqueotomía / traqueostomía
+]
+
+_HF_KEYWORDS_PA = {"familiares", "heredofamiliares", "en familia"}
+
+# Regex: "no" followed by 0-2 words followed by a habit keyword, ANYWHERE in phrase
+_RE_HABIT_IN_TEXT = re.compile(
+    r'\bno\s+(?:\w+\s+){0,2}(?:'
+    + '|'.join(sorted(_HABIT_KEYWORDS_PA, key=len, reverse=True))
+    + r')',
+    re.IGNORECASE,
+)
+
+# Regex: "niega" ANYWHERE in phrase
+_RE_NEGATION_IN_TEXT = re.compile(r'\bniega\b', re.IGNORECASE)
+
+
+def _postprocess_interview_fields(data: dict, scope: str | None) -> dict:
+    """
+    Move misplaced antecedentes data from padecimientoActual to the correct
+    antecedentes subfields.  Only applies when scope == "interview".
+
+    Detection is done ANYWHERE in each phrase (not just at the start):
+      (a) Habits ("no fuma", "refiere que no toma alcohol") → personalesNoPatologicos
+      (b) Disease negations ("niega diabetes")              → personalesPatologicos
+      (c) Surgeries ("apendicectomía …")                    → personalesPatologicos
+      (d) Family history ("en familiares …")                → heredofamiliares
+
+    Remaining phrases stay in padecimientoActual.
+
+    PHI-safe: only logs counts.
+    """
+    if scope != "interview":
+        return data
+
+    pa = data.get("padecimientoActual")
+    if not pa or not isinstance(pa, str):
+        return data
+
+    # Ensure antecedentes structure
+    antecedentes = data.get("antecedentes") or {}
+    if not isinstance(antecedentes, dict):
+        antecedentes = {}
+
+    heredofam = antecedentes.get("heredofamiliares") or ""
+    apnp = antecedentes.get("personalesNoPatologicos") or ""
+    app_field = antecedentes.get("personalesPatologicos") or ""
+
+    # Split into phrases by period, semicolon, or comma+space
+    phrases = [p.strip() for p in re.split(r'(?:\.\s*|;\s*|,\s+)', pa) if p.strip()]
+
+    remaining: list[str] = []
+    to_apnp: list[str] = []
+    to_app: list[str] = []
+    to_hf: list[str] = []
+
+    for phrase in phrases:
+        lower = phrase.lower()
+
+        # (d) HF
+        if any(kw in lower for kw in _HF_KEYWORDS_PA):
+            to_hf.append(phrase)
+        # (a) Habits: "no" + habit keyword anywhere in phrase
+        elif _RE_HABIT_IN_TEXT.search(lower):
+            to_apnp.append(phrase)
+        # (b) Disease negation: "niega" anywhere in phrase
+        elif _RE_NEGATION_IN_TEXT.search(lower):
+            to_app.append(phrase)
+        # (c) Surgeries / procedures
+        elif any(kw in lower for kw in _SURGERY_KEYWORDS_PA):
+            to_app.append(phrase)
+        else:
+            remaining.append(phrase)
+
+    moved_count = len(to_apnp) + len(to_app) + len(to_hf)
+    if moved_count == 0:
+        return data
+
+    logger.info(
+        "interview_postprocess_rerouted",
+        moved_to_apnp=len(to_apnp),
+        moved_to_app=len(to_app),
+        moved_to_hf=len(to_hf),
+        remaining=len(remaining),
+    )
+
+    # Update padecimientoActual
+    if remaining:
+        new_pa = ". ".join(remaining)
+        if not new_pa.endswith("."):
+            new_pa += "."
+        data["padecimientoActual"] = new_pa
+    else:
+        data["padecimientoActual"] = None
+
+    # Helper: concatenate with ". "
+    def _append(existing: str, new_phrases: list[str]) -> str:
+        new_text = ". ".join(new_phrases)
+        return f"{existing}. {new_text}" if existing else new_text
+
+    if to_hf:
+        heredofam = _append(heredofam, to_hf)
+    if to_apnp:
+        apnp = _append(apnp, to_apnp)
+    if to_app:
+        app_field = _append(app_field, to_app)
+
+    antecedentes["heredofamiliares"] = heredofam or None
+    antecedentes["personalesNoPatologicos"] = apnp or None
+    antecedentes["personalesPatologicos"] = app_field or None
+    data["antecedentes"] = antecedentes
+
+    return data
+
+
+# ── Deterministic surgery rescue from transcript ──
+
+# Tolerant regex patterns for common surgical procedures (handles typos).
+# Each tuple: (compiled regex, canonical label used for dedup key).
+_SURGERY_RESCUE_PATTERNS: list[tuple[re.Pattern, str]] = [
+    # colecistectomía / colesistectomía (and common typos)
+    (re.compile(
+        r'\bcole[sc]istectom[ií]a\b[^.;]*',
+        re.IGNORECASE,
+    ), "colecistectomia"),
+    # apendicectomía / apendisectomía
+    (re.compile(
+        r'\bapend[ií][cs]ectom[ií]a\b[^.;]*',
+        re.IGNORECASE,
+    ), "apendicectomia"),
+    # amigdalectomía
+    (re.compile(
+        r'\bamigdalectom[ií]a\b[^.;]*',
+        re.IGNORECASE,
+    ), "amigdalectomia"),
+    # circuncisión
+    (re.compile(
+        r'\bcircuncisi[oó]n\b[^.;]*',
+        re.IGNORECASE,
+    ), "circuncision"),
+    # histerectomía
+    (re.compile(
+        r'\bhisterectom[ií]a\b[^.;]*',
+        re.IGNORECASE,
+    ), "histerectomia"),
+    # cesárea
+    (re.compile(
+        r'\bces[aá]rea\b[^.;]*',
+        re.IGNORECASE,
+    ), "cesarea"),
+    # hernioplastía / hernioplastia
+    (re.compile(
+        r'\bhernioplast[ií]a\b[^.;]*',
+        re.IGNORECASE,
+    ), "hernioplastia"),
+    # tiroidectomía
+    (re.compile(
+        r'\btiroidectom[ií]a\b[^.;]*',
+        re.IGNORECASE,
+    ), "tiroidectomia"),
+    # ── ORL-specific procedures ──
+    # rinoplastia
+    (re.compile(
+        r'\brinoplast[ií]a\b[^.;]*',
+        re.IGNORECASE,
+    ), "rinoplastia"),
+    # septoplastia — tolerant regex also captures ASR typo "esceptoplastía":
+    #   "septoplastia"   → e? s  c?  e  pt  o  plast ia ✓
+    #   "esceptoplastía" → e  s  c   e  pt  o  plast ía ✓
+    #   "siptoplastía"   → e? s  c?  i  pt  o  plast ía ✓
+    (re.compile(
+        r'\be?sc?[ei]pt?o?plast[ií]a\b[^.;]*',
+        re.IGNORECASE,
+    ), "septoplastia"),
+    # timpanoplastia
+    (re.compile(
+        r'\btimpanoplast[ií]a\b[^.;]*',
+        re.IGNORECASE,
+    ), "timpanoplastia"),
+    # adenoidectomía
+    (re.compile(
+        r'\badenoidectom[ií]a\b[^.;]*',
+        re.IGNORECASE,
+    ), "adenoidectomia"),
+    # traqueotomía / traqueostomía
+    (re.compile(
+        r'\btraqueo(?:t|st)om[ií]a\b[^.;]*',
+        re.IGNORECASE,
+    ), "traqueotomia"),
+    # generic "me operaron …" / "lo operaron …" / "fue operado/a …"
+    (re.compile(
+        r'(?:me|lo|la|le|fue)\s+operar?on\b[^.;]*',
+        re.IGNORECASE,
+    ), "operaron_generico"),
+    # generic "cirugía previa" / "cirugía de …"
+    (re.compile(
+        r'\bcirug[ií]a\s+(?:previa|de\b)[^.;]*',
+        re.IGNORECASE,
+    ), "cirugia_generica"),
+]
+
+# Extra substrings checked in the existing personalesPatologicos text to avoid
+# duplicate rescue when ASR typos produce a non-canonical spelling.
+# key = canonical_key from _SURGERY_RESCUE_PATTERNS
+# value = tuple of additional lowercase fragments; if ANY is present, skip rescue.
+_SURGERY_RESCUE_EXTRA_CHECKS: dict[str, tuple[str, ...]] = {
+    "septoplastia": ("septoplast", "esceptoplast", "siptoplast"),
+}
+
+# Post-capture normalization: correct ASR typos in the raw matched phrase.
+# key = canonical_key; value = (pattern to replace, canonical replacement string)
+_SURGERY_RESCUE_NORMALIZATIONS: dict[str, tuple[re.Pattern, str]] = {
+    "septoplastia": (
+        re.compile(r'\be?sc?[ei]pt?o?plast[ií]a\b', re.IGNORECASE),
+        "Septoplastia",
+    ),
+}
+
+
+def rescue_surgeries_from_transcript(data: dict, transcript_text: str, scope: str | None) -> dict:
+    """
+    Deterministic safety-net: scan *transcript_text* for surgical procedures
+    and ensure they appear in antecedentes.personalesPatologicos.
+
+    Only runs for scope == "interview".
+    Skips any procedure whose canonical key is already present in the field
+    (case-insensitive substring check) to avoid duplicates.
+
+    Each rescued phrase is a complete sentence ending in a period.
+
+    PHI-safe: only logs counts.
+    """
+    if scope != "interview" or not transcript_text:
+        return data
+
+    antecedentes = data.get("antecedentes") or {}
+    if not isinstance(antecedentes, dict):
+        antecedentes = {}
+
+    app_field = (antecedentes.get("personalesPatologicos") or "").strip()
+    app_lower = app_field.lower()
+
+    rescued: list[str] = []
+
+    for pattern, canonical_key in _SURGERY_RESCUE_PATTERNS:
+        # Skip if canonical key already present in antecedentes.
+        # Primary check: canonical key minus trailing 'a' covers most
+        # inflections (e.g. "colecistectomi" matches both spellings).
+        # Extra checks: handle ASR typo variants (e.g. "esceptoplast" for
+        # "septoplast") defined per canonical_key in _SURGERY_RESCUE_EXTRA_CHECKS.
+        check_key = canonical_key.rstrip("a")
+        extra_checks = _SURGERY_RESCUE_EXTRA_CHECKS.get(canonical_key, ())
+        if check_key in app_lower or any(ec in app_lower for ec in extra_checks):
+            continue
+
+        match = pattern.search(transcript_text)
+        if match:
+            phrase = match.group(0).strip().rstrip(".,;: ")
+            # Normalize known ASR typos to canonical spelling
+            # (e.g. "esceptoplastía" → "Septoplastia")
+            if canonical_key in _SURGERY_RESCUE_NORMALIZATIONS:
+                norm_pat, norm_repl = _SURGERY_RESCUE_NORMALIZATIONS[canonical_key]
+                phrase = norm_pat.sub(norm_repl, phrase, count=1)
+            # Capitalize first letter
+            if phrase:
+                phrase = phrase[0].upper() + phrase[1:]
+                if not phrase.endswith("."):
+                    phrase += "."
+                rescued.append(phrase)
+
+    if not rescued:
+        return data
+
+    logger.info("interview_surgery_rescue", rescued_count=len(rescued))
+
+    new_text = " ".join(rescued)
+    if app_field:
+        # Ensure existing text ends with period before appending
+        if not app_field.endswith("."):
+            app_field += "."
+        app_field = f"{app_field} {new_text}"
+    else:
+        app_field = new_text
+
+    antecedentes["personalesPatologicos"] = app_field
+    data["antecedentes"] = antecedentes
+
+    return data
+
+
+# ── Negation normalization ──
+
+_INCOMPLETE_NEGATION_RE = re.compile(
+    r'^('
+    # single-token stopwords and pronouns
+    r'e|y|o|ni|a|de|del|con|en|ha|las?|los?|un[ao]?s?'
+    r'|se|me|te|mi|su|sus|por'
+    r'|ha presentado|presentado'
+    # two-token pronoun/stopword sequences (ASR noise)
+    r'|se me|me la|me lo|me las|me los|te la|te lo|te las|te los'
+    r'|se le|se lo|se la|se les|no me|no se'
+    r')$',
+    re.IGNORECASE,
+)
+
+_TRAILING_DANGLING_RE = re.compile(
+    r'[\s,/]+(ni|y|e|o|a|de|del|con|en|por|la|el|me|te|mi|su)$',
+    re.IGNORECASE,
+)
+
+
+# First-person singular verb prefixes that add no clinical information to a
+# negation item: "tomo medicamentos" → "medicamentos", "uso drogas" → "drogas".
+# Third-person ("toma", "usa") is intentionally excluded to preserve items like
+# "toma alcohol" which an existing test explicitly checks for.
+_NEGATION_VERB_PREFIX_RE = re.compile(
+    r'^\b(?:tomo|uso|consumo)\s+',
+    re.IGNORECASE,
+)
+
+# Multi-word sequences composed entirely of stopwords/pronouns.
+# Catches ASR noise like "se me", "me lo", "te la" that slip through as full
+# negation items.  Must anchor both ends.
+_PURE_STOPWORD_SEQ_RE = re.compile(
+    r'^(?:(?:se|me|te|le|nos|os|la|lo|las|los)\s+)+'
+    r'(?:se|me|te|le|nos|os|la|lo|las|los)$',
+    re.IGNORECASE,
+)
+
+
+def _normalize_negations(negations: list | None) -> list:
+    """
+    Clean negation entries: drop noise, trim dangling prepositions, merge
+    fragments, deduplicate, and remove word-set subsumptions.
+
+    Phases:
+      0.5 Strip first-person verb prefixes ("tomo X" → "X").
+      1.  Drop incomplete tokens, pure-stopword sequences, trim dangling
+          prepositions/conjunctions.
+      2.  Merge adjacent fragments ("alergias" + "medicamentos" → "alergias a
+          medicamentos").
+      3.  Deduplicate preserving order (case-insensitive exact match).
+      3.5 Subsumption dedup: if every word of item A appears in item B AND all
+          of A's words are ≥ 4 chars, drop A (B is the more specific form).
+          Guard: items with any word < 4 chars (e.g. "tos", "asma") are never
+          subsumed so that "tos" and "tos productiva" both survive.
+
+    PHI-safe: no content logging.
+    """
+    if not negations:
+        return []
+
+    # Phase 0.5: strip first-person verb prefixes
+    stripped: list[str] = []
+    for neg in negations:
+        if not isinstance(neg, str):
+            continue
+        neg = _NEGATION_VERB_PREFIX_RE.sub('', neg.strip())
+        stripped.append(neg)
+
+    # Phase 1: clean individual entries
+    cleaned: list[str] = []
+    for neg in stripped:
+        neg = neg.strip().rstrip(".,;:/")
+        if not neg or len(neg) < 3:
+            continue
+        if _INCOMPLETE_NEGATION_RE.match(neg):
+            continue
+        # Drop pure multi-token stopword sequences ("se me", "me la", ...)
+        if _PURE_STOPWORD_SEQ_RE.match(neg):
+            continue
+        # Trim trailing dangling preposition/conjunction (applied once)
+        neg = _TRAILING_DANGLING_RE.sub('', neg).strip()
+        if neg and len(neg) >= 3:
+            cleaned.append(neg)
+
+    # Phase 2: merge adjacent fragments
+    merged: list[str] = []
+    skip_next = False
+    for i, neg in enumerate(cleaned):
+        if skip_next:
+            skip_next = False
+            continue
+
+        if i + 1 < len(cleaned):
+            lower = neg.lower()
+            next_lower = cleaned[i + 1].lower()
+            if lower in ("alergias", "alergia") and next_lower.startswith("medicamento"):
+                merged.append(f"{neg} a {cleaned[i + 1]}")
+                skip_next = True
+                continue
+
+        merged.append(neg)
+
+    # Phase 3: deduplicate preserving order (case-insensitive)
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for neg in merged:
+        key = neg.lower()
+        if key not in seen:
+            seen.add(key)
+            deduped.append(neg)
+
+    # Phase 3.5: word-set subsumption dedup.
+    # If words(A) ⊆ words(B) strictly and every word of A is ≥ 4 chars,
+    # drop A (B is more specific / already contains A).
+    # The ≥ 4-char guard protects short clinical terms like "tos", "asma".
+    words_sets = [frozenset(neg.lower().split()) for neg in deduped]
+    final: list[str] = []
+    for i, neg in enumerate(deduped):
+        words_i = words_sets[i]
+        # Skip subsumption check when any word is short (≤ 3 chars)
+        if not words_i or any(len(w) <= 3 for w in words_i):
+            final.append(neg)
+            continue
+        # Drop if words_i is a strict subset of any other item's word-set
+        subsumed = any(
+            words_i < words_sets[j]
+            for j in range(len(deduped))
+            if j != i
+        )
+        if not subsumed:
+            final.append(neg)
+
+    return final
+
+
+# Terms that are almost always part of the chief complaint and should never
+# appear as negation items (even if the LLM sees them in negated secondary phrases).
+_CHIEF_COMPLAINT_EXCLUSIONS: frozenset[str] = frozenset({
+    "dolor", "molestia", "malestar", "consulta", "visita", "motivo",
+})
+
+
+def _filter_negations_against_positive_fields(data: dict) -> dict:
+    """
+    Remove from negations[] any item that represents a *positive* clinical
+    finding already captured in motivoConsulta or padecimientoActual.
+
+    This prevents the LLM from putting the chief-complaint symptom (e.g.
+    "dolor") into negations[] just because the word also appears in a
+    negated secondary phrase in the transcript.
+
+    Three filters applied (in order):
+      1. Exact exclusion list (_CHIEF_COMPLAINT_EXCLUSIONS).
+      2. Term appears verbatim in motivoConsulta or padecimientoActual text.
+      3. 2+ content words (≥4 chars) of the negation item all appear in
+         the positive text — catches short paraphrases.
+
+    PHI-safe: no content is logged.
+    """
+    negations = data.get("negations", [])
+    if not negations:
+        return data
+
+    positive_text = " ".join(p for p in [
+        (data.get("motivoConsulta") or "").lower(),
+        (data.get("padecimientoActual") or "").lower(),
+    ] if p)
+
+    filtered: list[str] = []
+    for neg in negations:
+        if not isinstance(neg, str):
+            continue
+        neg_lower = neg.lower().strip()
+
+        # Filter 1: known chief-complaint exclusions
+        if neg_lower in _CHIEF_COMPLAINT_EXCLUSIONS:
+            continue
+
+        # Filter 2: verbatim substring of positive clinical text
+        if positive_text and neg_lower in positive_text:
+            continue
+
+        # Filter 3: majority of content words appear in positive text
+        content_words = [w for w in neg_lower.split() if len(w) >= 4]
+        if positive_text and len(content_words) >= 2:
+            if sum(1 for w in content_words if w in positive_text) >= 2:
+                continue
+
+        filtered.append(neg)
+
+    data["negations"] = filtered
+    return data
+
+
+def _to_clinical_phrase(item: str, prefix: str) -> str:
+    """
+    Format a raw negation item as a self-contained clinical sentence.
+
+    If the item already begins with a clinical negation marker ("niega",
+    "no", "sin") the prefix is not added.  A trailing period is always
+    ensured.
+
+    Args:
+        item:   Raw negation string, e.g. "otras cirugías".
+        prefix: "Niega" for diseases/surgeries/allergies, "No" for habits.
+
+    Returns:
+        Formatted clinical sentence, e.g. "Niega otras cirugías."
+    """
+    clean = item.strip()
+    lower = clean.lower()
+    if lower.startswith(("niega ", "no ", "sin ")):
+        phrase = clean
+    else:
+        phrase = f"{prefix} {clean}"
+    return phrase if phrase.endswith(".") else phrase + "."
 
 
 def _merge_negations_into_antecedentes(data: dict, scope: str | None) -> dict:
@@ -519,9 +1131,9 @@ def _merge_negations_into_antecedentes(data: dict, scope: str | None) -> dict:
         "familia", "familiar", "familiares", "heredo",
     }
 
-    routed_to_apnp = []
-    routed_to_app = []
-    routed_to_heredofam = []
+    routed_to_apnp: list[str] = []
+    routed_to_app: list[str] = []
+    routed_to_heredofam: list[str] = []
 
     for neg in negations:
         if not isinstance(neg, str) or not neg.strip():
@@ -534,27 +1146,33 @@ def _merge_negations_into_antecedentes(data: dict, scope: str | None) -> dict:
         has_disease = any(kw in neg_lower for kw in patologicos_keywords)
 
         if has_family and has_disease:
-            routed_to_heredofam.append(neg.strip())
+            routed_to_heredofam.append(_to_clinical_phrase(neg.strip(), "Niega"))
         elif any(kw in neg_lower for kw in habit_keywords):
-            routed_to_apnp.append(neg.strip())
+            # Habits use "No" (e.g. "No fuma.", "No toma alcohol.")
+            routed_to_apnp.append(_to_clinical_phrase(neg.strip(), "No"))
         elif any(kw in neg_lower for kw in patologicos_keywords):
-            routed_to_app.append(neg.strip())
+            routed_to_app.append(_to_clinical_phrase(neg.strip(), "Niega"))
         else:
-            # Default: route to personalesPatologicos (most common for negations)
-            routed_to_app.append(neg.strip())
+            # Default: personalesPatologicos with "Niega" prefix
+            routed_to_app.append(_to_clinical_phrase(neg.strip(), "Niega"))
+
+    def _append_phrases(existing: str, phrases: list[str]) -> str:
+        """Concatenate clinical phrases onto existing field text."""
+        new_text = " ".join(phrases)
+        if not existing:
+            return new_text
+        sep = " " if existing.rstrip().endswith(".") else ". "
+        return existing.rstrip() + sep + new_text
 
     # Merge routed negations into existing fields
     if routed_to_heredofam:
-        new_text = ". ".join(routed_to_heredofam)
-        heredofam = f"{heredofam}. {new_text}".strip(". ") if heredofam else new_text
+        heredofam = _append_phrases(heredofam, routed_to_heredofam)
 
     if routed_to_apnp:
-        new_text = ". ".join(routed_to_apnp)
-        apnp = f"{apnp}. {new_text}".strip(". ") if apnp else new_text
+        apnp = _append_phrases(apnp, routed_to_apnp)
 
     if routed_to_app:
-        new_text = ". ".join(routed_to_app)
-        app = f"{app}. {new_text}".strip(". ") if app else new_text
+        app = _append_phrases(app, routed_to_app)
 
     # Update antecedentes
     antecedentes["heredofamiliares"] = heredofam if heredofam else None
@@ -576,8 +1194,14 @@ def _build_v1_user_prompt(transcript: Transcript, context: Optional[Context]) ->
     PHI-safe: Esta funcion es interna; el prompt NUNCA se loguea.
     """
     # Detectar modo
+    scope = context.scope if context else None
     speakers = set(seg.speaker for seg in transcript.segments)
-    is_dictation = len(speakers) == 1 or all(s in ("doctor", "unknown") for s in speakers)
+    # For interview scope, never force DICTADO: a transcript where all speakers
+    # are "unknown" (no diarisation) is still a doctor-patient conversation.
+    # Other scopes (exam/dictado) keep the existing detection logic.
+    is_dictation = (
+        len(speakers) == 1 or all(s in ("doctor", "unknown") for s in speakers)
+    ) and scope != "interview"
 
     # Construir texto
     text_parts = []
@@ -604,7 +1228,17 @@ def _build_v1_user_prompt(transcript: Transcript, context: Optional[Context]) ->
                 context_parts.append(f"Sexo: {gender}")
 
     context_line = f"[{', '.join(context_parts)}] " if context_parts else ""
-    mode = "DICTADO" if is_dictation else "CONSULTA"
+
+    if is_dictation:
+        mode = "DICTADO"
+    elif scope == "interview" and all(
+        seg.speaker in ("unknown", "doctor") for seg in transcript.segments
+    ):
+        # Interview without speaker diarisation: make it explicit so the LLM
+        # knows both speaker turns are present in the undifferentiated stream.
+        mode = "CONSULTA (sin segmentación de turnos — el texto mezcla preguntas del médico y respuestas del paciente)"
+    else:
+        mode = "CONSULTA"
 
     return f"""{mode}: {context_line}
 {transcript_text}
@@ -752,6 +1386,16 @@ def _parse_v1_output(output: str, scope: str | None = None) -> StructuredFieldsV
     try:
         repaired = _repair_v1_dict(data)
 
+        # Normalize negations list (clean incomplete tokens)
+        repaired["negations"] = _normalize_negations(repaired.get("negations", []))
+
+        # Filter negations[] against positive clinical fields to remove false
+        # positives (e.g. chief-complaint symptom "dolor" appearing as negation).
+        repaired = _filter_negations_against_positive_fields(repaired)
+
+        # Post-process interview: move misplaced antecedentes from padecimientoActual
+        repaired = _postprocess_interview_fields(repaired, scope)
+
         # Merge negations into antecedentes for interview scope (before scope mask)
         repaired = _merge_negations_into_antecedentes(repaired, scope)
 
@@ -895,6 +1539,7 @@ async def extract_structured_v1(
     # Propagate upstream negations from context when provided.
     if context and context.negations:
         upstream_negations = [n for n in context.negations if isinstance(n, str) and n.strip()]
+        upstream_negations = _normalize_negations(upstream_negations)
         fields.negations = upstream_negations
 
         # For interview scope, merge context negations into antecedentes
@@ -915,16 +1560,54 @@ async def extract_structured_v1(
 
     # PHI-safe debug metrics
     try:
+        def _field_counts(val):
+            """Return PHI-safe (char_count, line_count) for a string field."""
+            if not val:
+                return 0, 0
+            return len(val), val.count(".") + val.count("\n")
+
+        motivo_len, motivo_lines = _field_counts(fields.motivo_consulta)
+        padec_len, padec_lines = _field_counts(fields.padecimiento_actual)
+        apnp_len, apnp_lines = _field_counts(
+            fields.antecedentes.personales_no_patologicos if fields.antecedentes else None
+        )
+        app_len, app_lines = _field_counts(
+            fields.antecedentes.personales_patologicos if fields.antecedentes else None
+        )
+        heredofam_len, heredofam_lines = _field_counts(
+            fields.antecedentes.heredofamiliares if fields.antecedentes else None
+        )
+
+        # Compute scope-aware extraction quality metadata
+        extraction_meta = compute_extraction_meta(fields, scope)
+
         debug_metrics = {
+            "scope": scope or "full",
             "has_motivo": fields.motivo_consulta is not None,
+            "motivo_len": motivo_len,
+            "motivo_lines": motivo_lines,
             "has_padecimiento": fields.padecimiento_actual is not None,
+            "padecimiento_len": padec_len,
+            "padecimiento_lines": padec_lines,
             "has_diagnostico": fields.diagnostico is not None,
             "has_plan": fields.plan_tratamiento is not None,
-            "has_otoscopia": fields.exploracion_fisica.otoscopia is not None,
-            "has_rinoscopia": fields.exploracion_fisica.rinoscopia is not None,
-            "has_orofaringe": fields.exploracion_fisica.orofaringe is not None,
-            "has_cuello": fields.exploracion_fisica.cuello is not None,
+            "has_heredofam": fields.antecedentes.heredofamiliares is not None if fields.antecedentes else False,
+            "heredofam_len": heredofam_len,
+            "heredofam_lines": heredofam_lines,
+            "has_apnp": fields.antecedentes.personales_no_patologicos is not None if fields.antecedentes else False,
+            "apnp_len": apnp_len,
+            "apnp_lines": apnp_lines,
+            "has_app": fields.antecedentes.personales_patologicos is not None if fields.antecedentes else False,
+            "app_len": app_len,
+            "app_lines": app_lines,
+            "has_otoscopia": fields.exploracion_fisica.otoscopia is not None if fields.exploracion_fisica else False,
+            "has_rinoscopia": fields.exploracion_fisica.rinoscopia is not None if fields.exploracion_fisica else False,
+            "has_orofaringe": fields.exploracion_fisica.orofaringe is not None if fields.exploracion_fisica else False,
+            "has_cuello": fields.exploracion_fisica.cuello is not None if fields.exploracion_fisica else False,
             "diagnostico_tipo": fields.diagnostico.tipo if fields.diagnostico else None,
+            "useful_flag": extraction_meta["hasContent"],
+            "sparse_flag": not extraction_meta["hasContent"],
+            "negated_findings_count": extraction_meta["negatedFindingsCount"],
         }
         logger.info("v1_extraction_metrics", **debug_metrics)
     except Exception:

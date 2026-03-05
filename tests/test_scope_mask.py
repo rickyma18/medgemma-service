@@ -3,7 +3,7 @@ Tests for scope mask (FIX #8).
 
 Validates:
 - _is_effectively_empty: detects truly empty values
-- _apply_scope_mask: non-destructive; preserves cross-scope data
+- _apply_scope_mask: strict; nulls out-of-scope fields
 - All four scopes: interview, exam, studies, assessment
 - Integration via _parse_v1_output with scope
 """
@@ -92,8 +92,8 @@ class TestScopeMaskInterview:
         assert result["antecedentes"]["personalesNoPatologicos"] == "Niega tabaquismo"
         assert result["antecedentes"]["personalesPatologicos"] == "Alergia a sulfas"
 
-    def test_interview_preserves_cross_scope_bonus_data(self):
-        """If LLM extracted exam findings during interview, keep them."""
+    def test_interview_strictly_nulls_cross_scope_data(self):
+        """Out-of-scope fields are strictly nulled even if LLM filled them."""
         data = {
             "motivoConsulta": "Dolor de oido",
             "padecimientoActual": "Otalgia 2 dias",
@@ -118,13 +118,13 @@ class TestScopeMaskInterview:
         assert result["motivoConsulta"] == "Dolor de oido"
         assert result["padecimientoActual"] == "Otalgia 2 dias"
 
-        # Out-of-scope with data: preserved (bonus data)
-        assert result["exploracionFisica"]["otoscopia"] == "CAE eritematoso"
-        assert result["diagnostico"]["texto"] == "Otitis externa"
-        assert result["planTratamiento"] == "Gotas oticas ciprofloxacino"
+        # Out-of-scope: strictly nulled
+        assert result["exploracionFisica"] is None
+        assert result["diagnostico"] is None
+        assert result["planTratamiento"] is None
 
     def test_interview_normalizes_empty_out_of_scope(self):
-        """Empty out-of-scope fields are normalized to null/{}."""
+        """Empty out-of-scope fields are normalized to null."""
         data = {
             "motivoConsulta": "Dolor",
             "padecimientoActual": None,
@@ -139,9 +139,8 @@ class TestScopeMaskInterview:
 
         result = _apply_scope_mask(data, "interview")
 
-        # Dict-typed out-of-scope stays {}
-        assert result["exploracionFisica"] == {}
-        # Scalar out-of-scope stays None
+        # Out-of-scope: strictly null
+        assert result["exploracionFisica"] is None
         assert result["diagnostico"] is None
         assert result["planTratamiento"] is None
 
@@ -201,8 +200,8 @@ class TestScopeMaskExam:
         assert result["exploracionFisica"]["cuello"] == "Adenopatia submandibular"
         assert result["exploracionFisica"]["rinoscopia"] == "Cornetes hipertroficos"
 
-    def test_exam_preserves_cross_scope_motivo(self):
-        """If LLM extracted motivo during exam step, keep it."""
+    def test_exam_strictly_nulls_cross_scope_motivo(self):
+        """Out-of-scope motivo is nulled even if LLM extracted it during exam."""
         data = {
             "motivoConsulta": "Dolor de garganta",
             "padecimientoActual": None,
@@ -219,10 +218,9 @@ class TestScopeMaskExam:
 
         result = _apply_scope_mask(data, "exam")
 
-        # Out-of-scope with value: preserved
-        assert result["motivoConsulta"] == "Dolor de garganta"
-        # Out-of-scope empty: normalized
-        assert result["antecedentes"] == {}
+        # Out-of-scope: strictly nulled
+        assert result["motivoConsulta"] is None
+        assert result["antecedentes"] is None
 
     def test_exam_empty_antecedentes_normalized(self):
         data = {
@@ -239,8 +237,8 @@ class TestScopeMaskExam:
 
         result = _apply_scope_mask(data, "exam")
 
-        # antecedentes with all-null subfields is effectively empty
-        assert result["antecedentes"] == {}
+        # antecedentes out-of-scope → null
+        assert result["antecedentes"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -269,8 +267,8 @@ class TestScopeMaskAssessment:
         assert result["planTratamiento"] == "Amoxicilina 500mg c/8h x7d"
         assert result["pronostico"] == "Bueno"
 
-    def test_assessment_preserves_cross_scope_antecedentes(self):
-        """If LLM mentions allergies during assessment, keep them."""
+    def test_assessment_strictly_nulls_cross_scope_antecedentes(self):
+        """Out-of-scope antecedentes are nulled even if LLM mentioned allergies."""
         data = {
             "motivoConsulta": None,
             "padecimientoActual": None,
@@ -285,8 +283,8 @@ class TestScopeMaskAssessment:
 
         result = _apply_scope_mask(data, "assessment")
 
-        # Cross-scope allergy data preserved
-        assert result["antecedentes"]["personalesPatologicos"] == "Alergia a penicilina"
+        # Cross-scope antecedentes strictly nulled
+        assert result["antecedentes"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -328,8 +326,8 @@ class TestScopeMaskStudies:
 
         result = _apply_scope_mask(data, "studies")
 
-        assert result["exploracionFisica"] == {}
-        assert result["antecedentes"] == {}
+        assert result["exploracionFisica"] is None
+        assert result["antecedentes"] is None
         assert result["motivoConsulta"] is None
 
 
@@ -339,8 +337,8 @@ class TestScopeMaskStudies:
 
 class TestScopeMaskUnknown:
 
-    def test_unknown_scope_preserves_populated_fields(self):
-        """Unknown scope has no allowed set; populated data still preserved."""
+    def test_unknown_scope_nulls_all_fields(self):
+        """Unknown scope has no allowed set; all fields are nulled."""
         data = {
             "motivoConsulta": "Dolor",
             "padecimientoActual": None,
@@ -355,10 +353,9 @@ class TestScopeMaskUnknown:
 
         result = _apply_scope_mask(data, "unknown_scope")
 
-        # Populated out-of-scope data preserved
-        assert result["motivoConsulta"] == "Dolor"
-        # Empty out-of-scope normalized
-        assert result["exploracionFisica"] == {}
+        # All fields nulled (no allowed set for unknown scope)
+        assert result["motivoConsulta"] is None
+        assert result["exploracionFisica"] is None
 
     def test_unknown_scope_all_empty(self):
         data = {
@@ -375,8 +372,8 @@ class TestScopeMaskUnknown:
 
         result = _apply_scope_mask(data, "unknown_scope")
 
-        assert result["antecedentes"] == {}
-        assert result["exploracionFisica"] == {}
+        assert result["antecedentes"] is None
+        assert result["exploracionFisica"] is None
         assert result["motivoConsulta"] is None
 
 
@@ -427,8 +424,8 @@ class TestParseV1OutputWithScope:
         result = _parse_v1_output(raw, scope="exam")
 
         assert result.exploracion_fisica.orofaringe == "Amigdalas grado II"
-        # Cross-scope bonus preserved
-        assert result.motivo_consulta == "Dolor de garganta"
+        # Cross-scope: strictly nulled
+        assert result.motivo_consulta is None
 
     def test_no_scope_returns_all_fields(self):
         """Without scope, all fields are preserved as-is."""
@@ -457,7 +454,7 @@ class TestParseV1OutputWithScope:
 class TestScopeMaskEdgeCases:
 
     def test_missing_field_in_data(self):
-        """Fields not present in data are treated as None/{}."""
+        """Fields not present in data are treated as None."""
         data = {
             "motivoConsulta": "Dolor",
             # Missing all other fields
@@ -468,7 +465,7 @@ class TestScopeMaskEdgeCases:
         assert result["motivoConsulta"] == "Dolor"
         assert result["padecimientoActual"] is None
         assert result["antecedentes"] is None  # not in data, in-scope → None from .get()
-        assert result["exploracionFisica"] == {}  # out-of-scope empty → {}
+        assert result["exploracionFisica"] is None  # out-of-scope → None
 
     def test_all_scopes_have_entries(self):
         """Verify SCOPE_ALLOWED_FIELDS covers all four scopes."""

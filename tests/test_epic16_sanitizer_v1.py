@@ -234,9 +234,9 @@ class TestSanitizeStructuredFieldsV1:
         result = sanitize_structured_fields_v1(StructuredFieldsV1())
         assert result.motivo_consulta is None
         assert result.diagnostico is None
-        # Should return valid empty objects (schema compatibility)
-        assert isinstance(result.antecedentes, Antecedentes)
-        assert isinstance(result.exploracion_fisica, ExploracionFisica)
+        # Empty defaults are None (no inflated objects)
+        assert result.antecedentes is None
+        assert result.exploracion_fisica is None
 
     def test_all_garbage_fields(self):
         fields = StructuredFieldsV1(

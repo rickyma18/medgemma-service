@@ -23,14 +23,11 @@ def test_aggregator_strings():
 
 def test_aggregator_nested_objects():
     # Antecedentes merge
-    v1 = StructuredFieldsV1()
-    v1.antecedentes.heredofamiliares = "Padre DM2"
-    
-    v2 = StructuredFieldsV1()
-    v2.antecedentes.personales_patologicos = "Asma"
-    
+    v1 = StructuredFieldsV1(antecedentes=Antecedentes(heredofamiliares="Padre DM2"))
+    v2 = StructuredFieldsV1(antecedentes=Antecedentes(personalesPatologicos="Asma"))
+
     merged = aggregate_structured_fields_v1([v1, v2])
-    
+
     assert merged.antecedentes.heredofamiliares == "Padre DM2"
     assert merged.antecedentes.personales_patologicos == "Asma"
 

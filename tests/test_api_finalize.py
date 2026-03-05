@@ -416,3 +416,186 @@ def test_consistency_true_accepts_string_transcript(client, mock_contracts):
 
     # Flutter compat
     assert metadata["warnings"] == metadata["contractWarnings"]
+
+
+# --- Surgery rescue tests (interview scope) ---
+
+def test_finalize_interview_rescues_colesistectomia(client, mock_contracts):
+    """Transcript with misspelled 'colesistectomía' must appear in personalesPatologicos."""
+    mock_contracts.return_value = {"warnings": [], "details": None}
+
+    # Fields come from LLM extraction — surgery was NOT captured by LLM
+    fields = StructuredFieldsV1(
+        motivoConsulta="Dolor de oído derecho",
+        padecimientoActual="Otalgia de 3 días",
+        antecedentes={
+            "heredofamiliares": None,
+            "personalesNoPatologicos": "No fuma. No toma alcohol",
+            "personalesPatologicos": None,
+        },
+        diagnostico={"texto": "Otalgia en estudio", "tipo": "presuntivo"},
+    )
+
+    payload = {
+        "structuredFields": fields.model_dump(by_alias=True),
+        "transcript": _make_transcript_payload(
+            "No fumo, no tomo alcohol.",
+            "Me hicieron una colesistectomía hace 8 años.",
+            "Me duele el oído derecho desde hace 3 días.",
+        ),
+        "context": {"scope": "interview"},
+    }
+
+    response = client.post("/v1/finalize", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["success"] is True
+
+    app_field = data["data"]["antecedentes"]["personalesPatologicos"]
+    assert app_field is not None, "personalesPatologicos should not be null"
+    app_lower = app_field.lower()
+
+    # Must contain surgery — either original typo or corrected canonical form
+    assert "colecistectom" in app_lower or "colesistectom" in app_lower, (
+        f"Expected surgery in personalesPatologicos, got: {app_field}"
+    )
+    # Must NOT contain placeholders
+    for placeholder in ("sin datos", "no refiere", "n/a", "pendiente"):
+        assert placeholder not in app_lower, f"Unexpected placeholder '{placeholder}'"
+
+
+def test_finalize_interview_rescues_colecistectomia_correct_spelling(client, mock_contracts):
+    """Transcript with correctly spelled 'colecistectomía' must appear in personalesPatologicos."""
+    mock_contracts.return_value = {"warnings": [], "details": None}
+
+    fields = StructuredFieldsV1(
+        motivoConsulta=None,
+        antecedentes={
+            "heredofamiliares": None,
+            "personalesNoPatologicos": None,
+            "personalesPatologicos": "Niega alergias",
+        },
+        diagnostico={"texto": "Consulta ORL en estudio", "tipo": "sindromico"},
+    )
+
+    payload = {
+        "structuredFields": fields.model_dump(by_alias=True),
+        "transcript": _make_transcript_payload(
+            "Colecistectomía hace 3 años. Niega alergias.",
+        ),
+        "context": {"scope": "interview"},
+    }
+
+    response = client.post("/v1/finalize", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+
+    app_field = data["data"]["antecedentes"]["personalesPatologicos"]
+    assert app_field is not None
+    app_lower = app_field.lower()
+    assert "colecistectom" in app_lower, (
+        f"Expected colecistectomía in personalesPatologicos, got: {app_field}"
+    )
+
+
+def test_finalize_interview_no_placeholder_in_surgery(client, mock_contracts):
+    """Surgery in transcript rescued into personalesPatologicos; output never has placeholders."""
+    mock_contracts.return_value = {"warnings": [], "details": None}
+
+    fields = StructuredFieldsV1(
+        motivoConsulta="Dolor de garganta",
+        padecimientoActual="Odinofagia de 3 días",
+        antecedentes={
+            "personalesPatologicos": None,  # LLM missed the surgery entirely
+        },
+        diagnostico={"texto": "Faringitis", "tipo": "presuntivo"},
+    )
+
+    payload = {
+        "structuredFields": fields.model_dump(by_alias=True),
+        "transcript": _make_transcript_payload(
+            "Me operaron de la vesícula hace 2 años.",
+            "Me duele la garganta desde hace 3 días.",
+        ),
+        "context": {"scope": "interview"},
+    }
+
+    response = client.post("/v1/finalize", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+
+    app_field = data["data"]["antecedentes"]["personalesPatologicos"]
+    # The rescue helper should have added the surgery
+    assert app_field is not None, "Surgery from transcript should have been rescued"
+    app_lower = app_field.lower()
+
+    # Must contain the surgery mention
+    assert "operaron" in app_lower or "vesícula" in app_lower or "vesicula" in app_lower, (
+        f"Expected surgery mention in personalesPatologicos, got: {app_field}"
+    )
+    # Must NOT contain placeholders
+    for placeholder in ("sin datos", "no refiere", "n/a", "pendiente"):
+        assert placeholder not in app_lower, f"Unexpected placeholder '{placeholder}'"
+
+
+# --- Bare symptom-token list tests ---
+
+def test_finalize_strips_bare_symptom_token_list(client, mock_contracts):
+    """padecimientoActual must not contain bare symptom-token lists like 'tos. fiebre. mareo.'."""
+    mock_contracts.return_value = {"warnings": [], "details": None}
+
+    fields = StructuredFieldsV1(
+        motivoConsulta="Dolor de oído",
+        padecimientoActual=(
+            "escalofríos. tos. gripe. otalgia. mareos. náuseas o vómito.\n"
+            "Niega fiebre, tos y mareo."
+        ),
+        diagnostico={"texto": "Otalgia", "tipo": "presuntivo"},
+    )
+
+    payload = {
+        "structuredFields": fields.model_dump(by_alias=True),
+    }
+
+    response = client.post("/v1/finalize", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+
+    pa = data["data"].get("padecimientoActual") or ""
+
+    # The bare token list must have been stripped
+    assert "escalofríos. tos." not in pa.lower(), (
+        f"Bare symptom-token list should have been removed, got: {pa}"
+    )
+    assert "gripe. otalgia." not in pa.lower(), (
+        f"Bare symptom-token list should have been removed, got: {pa}"
+    )
+
+    # The negation sentence should be preserved (it's narrative, not a bare list)
+    if pa:
+        assert "niega" in pa.lower(), (
+            f"Negation sentence should be preserved, got: {pa}"
+        )
+
+
+def test_finalize_keeps_narrative_padecimiento(client, mock_contracts):
+    """padecimientoActual with real narrative must NOT be stripped."""
+    mock_contracts.return_value = {"warnings": [], "details": None}
+
+    narrative = "Paciente refiere otalgia de 3 días de evolución en oído derecho."
+    fields = StructuredFieldsV1(
+        motivoConsulta="Dolor de oído",
+        padecimientoActual=narrative,
+        diagnostico={"texto": "Otalgia", "tipo": "presuntivo"},
+    )
+
+    payload = {
+        "structuredFields": fields.model_dump(by_alias=True),
+    }
+
+    response = client.post("/v1/finalize", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+
+    pa = data["data"].get("padecimientoActual")
+    assert pa == narrative, f"Narrative padecimiento should be unchanged, got: {pa}"

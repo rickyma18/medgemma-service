@@ -23,7 +23,13 @@ from app.schemas.finalize import FinalizeRequest, FinalizeResponse, FinalizeMeta
 from app.schemas.response import ErrorResponse, ErrorDetail, ResponseMetadata
 from app.schemas.structured_fields_v1 import StructuredFieldsV1
 from app.services.extractor import get_model_version
-from app.services.structured_v1_extractor import compute_extraction_meta
+from app.services.structured_v1_extractor import (
+    compute_extraction_meta,
+    _normalize_negations,
+    _postprocess_interview_fields,
+    _merge_negations_into_antecedentes,
+    rescue_surgeries_from_transcript,
+)
 
 # Reusing contract logic (No new logic invented)
 from app.contracts.contract_guard import check_contracts, get_contract_warnings
@@ -285,31 +291,101 @@ def _enforce_evidence_policy(
                 setattr(result, attr_name, None)
 
     # --- antecedentes sub-fields ---
-    if original_fields.antecedentes and result.antecedentes:
+    if result.antecedentes:
         _ant_fields = [
             ("heredofamiliares", "heredofamiliares"),
             ("personalesNoPatologicos", "personales_no_patologicos"),
             ("personalesPatologicos", "personales_patologicos"),
         ]
         for evidence_key, attr_name in _ant_fields:
-            orig = getattr(original_fields.antecedentes, attr_name, None)
+            orig = getattr(original_fields.antecedentes, attr_name, None) if original_fields.antecedentes else None
             ref = getattr(result.antecedentes, attr_name, None)
             if orig is None and ref is not None:
                 if not _has_evidence(transcript_text, evidence_key):
                     setattr(result.antecedentes, attr_name, None)
 
     # --- exploracionFisica sub-fields (single evidence key) ---
-    if original_fields.exploracion_fisica and result.exploracion_fisica:
+    if result.exploracion_fisica:
         for attr_name in (
             "signos_vitales", "rinoscopia", "orofaringe", "cuello",
             "laringoscopia", "otoscopia", "otomicroscopia", "endoscopia_nasal",
         ):
-            orig = getattr(original_fields.exploracion_fisica, attr_name, None)
+            orig = getattr(original_fields.exploracion_fisica, attr_name, None) if original_fields.exploracion_fisica else None
             ref = getattr(result.exploracion_fisica, attr_name, None)
             if orig is None and ref is not None:
                 if not _has_evidence(transcript_text, "exploracionFisica"):
                     setattr(result.exploracion_fisica, attr_name, None)
 
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Bare symptom-token list cleaner
+# ---------------------------------------------------------------------------
+
+_SYMPTOM_TOKENS = {
+    "fiebre", "tos", "dolor", "disnea", "cefalea", "odinofagia",
+    "otalgia", "rinorrea", "nausea", "náusea", "nauseas", "náuseas",
+    "vomito", "vómito", "mareo", "mareos", "diarrea", "gripe",
+    "secrecion", "secreción", "sangre", "zumbido", "escalofrios",
+    "escalofríos", "acufeno", "acúfeno", "otorrea", "otorragia",
+    "vertigo", "vértigo",
+}
+
+_BARE_TOKEN_LIST_RE = re.compile(
+    r'^[\w\sáéíóúüñ]+(?:\.\s*[\w\sáéíóúüñ]+){2,}\.*\s*$',
+    re.IGNORECASE,
+)
+
+
+def _is_bare_symptom_list(text: str) -> bool:
+    """Return True if *text* is a period-separated list of mostly symptom tokens.
+
+    Example: "escalofríos. tos. gripe. otalgia. mareos. náuseas o vómito."
+    """
+    if not text or '.' not in text:
+        return False
+    # Split on period boundaries.
+    parts = [p.strip().rstrip('.').strip().lower() for p in re.split(r'\.\s*', text) if p.strip()]
+    if len(parts) < 3:
+        return False
+    # Count how many parts are symptom tokens (allowing connectors "o", "y").
+    symptom_hits = 0
+    for part in parts:
+        # "náuseas o vómito" → split on connectors
+        sub_tokens = re.split(r'\s+[yoe]\s+|\s*,\s*', part)
+        if all(t.strip() in _SYMPTOM_TOKENS for t in sub_tokens if t.strip()):
+            symptom_hits += 1
+    return symptom_hits / len(parts) >= 0.6
+
+
+def _remove_bare_symptom_list_from_padecimiento(
+    fields: StructuredFieldsV1,
+) -> StructuredFieldsV1:
+    """Strip bare symptom-token lists from padecimientoActual.
+
+    If padecimientoActual contains both a bare symptom list segment AND
+    real narrative content, only the bare segment is removed.
+    If the entire field is a bare list, it is set to None.
+    """
+    pa = fields.padecimiento_actual
+    if not pa or not pa.strip():
+        return fields
+
+    lines = [l.strip() for l in pa.split('\n') if l.strip()]
+    cleaned: list[str] = []
+    for line in lines:
+        if _is_bare_symptom_list(line):
+            continue
+        cleaned.append(line)
+
+    result = fields.model_copy(deep=True)
+    if not cleaned:
+        result.padecimiento_actual = None
+    else:
+        new_pa = '\n'.join(cleaned)
+        if new_pa != pa:
+            result.padecimiento_actual = new_pa
     return result
 
 
@@ -399,6 +475,28 @@ async def finalize_extraction(
         if original_fields.negations and not final_fields.negations:
             final_fields.negations = list(original_fields.negations)
 
+        # 2.3 Interview scope postprocess: merge negations → antecedentes
+        # The extraction pipeline runs this during extraction, but the
+        # finalize endpoint receives pre-extracted fields.  When scope=interview
+        # and negations are populated but antecedentes subfields are null,
+        # we run the same deterministic postprocess + merge here.
+        finalize_scope = request_body.context.scope if request_body.context else None
+        if finalize_scope == "interview":
+            data_dict = final_fields.model_dump(by_alias=True)
+            raw_negations = list(data_dict.get("negations") or [])
+            clean_negations = _normalize_negations(raw_negations)
+            data_dict["negations"] = clean_negations
+            data_dict = _postprocess_interview_fields(data_dict, finalize_scope)
+            data_dict = _merge_negations_into_antecedentes(data_dict, finalize_scope)
+            # Rescue surgeries from transcript that the LLM may have missed
+            data_dict = rescue_surgeries_from_transcript(data_dict, transcript_text, finalize_scope)
+            # Restore cleaned negations (merge clears them for interview scope)
+            data_dict["negations"] = clean_negations
+            final_fields = StructuredFieldsV1.model_validate(data_dict)
+
+        # 2.4 Strip bare symptom-token lists from padecimientoActual
+        final_fields = _remove_bare_symptom_list_from_padecimiento(final_fields)
+
         # 2.5 Deterministic consistency check (no LLM)
         consistency_warnings: list = []
         if request_body.check_consistency:
@@ -419,8 +517,9 @@ async def finalize_extraction(
         evidence_list = None  # Future: extract from request or inference result
         used_evidence_bool = bool(evidence_list)
 
-        # Anti-sparse metadata (PHI-safe)
-        extraction_meta = compute_extraction_meta(final_fields)
+        # Anti-sparse metadata (PHI-safe, scope-aware)
+        finalize_scope = request_body.context.scope if request_body.context else None
+        extraction_meta = compute_extraction_meta(final_fields, scope=finalize_scope)
 
         response = FinalizeResponse(
             success=True,

@@ -65,27 +65,28 @@ def _merge_list_str_fields(values: List[List[str]]) -> List[str]:
             merged.append(item.strip())
     return merged
 
-def _merge_exploracion(items: List[ExploracionFisica]) -> ExploracionFisica:
+def _merge_exploracion(items: List[Optional[ExploracionFisica]]) -> Optional[ExploracionFisica]:
     """Merge de sub-objeto ExploracionFisica."""
-    # Como todos son strings opcionales, usamos _merge_str_fields para cada campo
+    valid = [i for i in items if i is not None]
+    if not valid:
+        return None
     merged = ExploracionFisica()
-    
     fields = merged.model_dump().keys()
     for f in fields:
-        vals = [getattr(item, f) for item in items]
+        vals = [getattr(item, f) for item in valid]
         setattr(merged, f, _merge_str_fields(vals))
-        
     return merged
 
-def _merge_antecedentes(items: List[Antecedentes]) -> Antecedentes:
+def _merge_antecedentes(items: List[Optional[Antecedentes]]) -> Optional[Antecedentes]:
     """Merge de sub-objeto Antecedentes."""
+    valid = [i for i in items if i is not None]
+    if not valid:
+        return None
     merged = Antecedentes()
     fields = merged.model_dump().keys()
-    
     for f in fields:
-        vals = [getattr(item, f) for item in items]
+        vals = [getattr(item, f) for item in valid]
         setattr(merged, f, _merge_str_fields(vals))
-        
     return merged
 
 def _merge_diagnostico(items: List[Optional[Diagnostico]]) -> Optional[Diagnostico]:

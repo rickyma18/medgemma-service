@@ -189,10 +189,10 @@ def _extract_evidence_from_fields(
         (fields.padecimiento_actual, "padecimientoActual"),
         (fields.diagnostico.texto if fields.diagnostico else None, "diagnostico.texto"),
         (fields.plan_tratamiento, "planTratamiento"),
-        (fields.exploracion_fisica.orofaringe, "exploracionFisica.orofaringe"),
-        (fields.exploracion_fisica.rinoscopia, "exploracionFisica.rinoscopia"),
-        (fields.exploracion_fisica.otoscopia, "exploracionFisica.otoscopia"),
-        (fields.exploracion_fisica.cuello, "exploracionFisica.cuello"),
+        (fields.exploracion_fisica.orofaringe if fields.exploracion_fisica else None, "exploracionFisica.orofaringe"),
+        (fields.exploracion_fisica.rinoscopia if fields.exploracion_fisica else None, "exploracionFisica.rinoscopia"),
+        (fields.exploracion_fisica.otoscopia if fields.exploracion_fisica else None, "exploracionFisica.otoscopia"),
+        (fields.exploracion_fisica.cuello if fields.exploracion_fisica else None, "exploracionFisica.cuello"),
     ]
 
     snippets_per_field = max(1, max_snippets // len([f for f, _ in field_checks if f]))

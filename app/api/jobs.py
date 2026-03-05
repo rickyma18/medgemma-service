@@ -244,9 +244,13 @@ async def get_job_status(
     elif job.status == "done":
         # Only return result if done
         if isinstance(job.result, StructuredFieldsV1):
+            # Pass scope for scope-aware sparse detection
+            job_scope = None
+            if job.request and job.request.context:
+                job_scope = job.request.context.scope
             result = {
                 "structuredFields": job.result.model_dump(by_alias=True, exclude_none=False),
-                "extractionMeta": compute_extraction_meta(job.result),
+                "extractionMeta": compute_extraction_meta(job.result, scope=job_scope),
             }
         elif isinstance(job.result, dict) and "structuredFields" in job.result:
             result = job.result

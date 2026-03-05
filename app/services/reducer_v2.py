@@ -168,12 +168,13 @@ def _detect_conflict(values: List[Optional[str]], merged: Optional[str]) -> bool
 
 
 def _merge_antecedentes_v2(
-    items: List[Antecedentes],
+    items: List[Optional[Antecedentes]],
     conflicts: List[ConflictMarker]
-) -> Antecedentes:
+) -> Optional[Antecedentes]:
     """Merge Antecedentes with field-specific strategies."""
-    if not items:
-        return Antecedentes()
+    valid = [i for i in items if i is not None]
+    if not valid:
+        return None
 
     field_map = {
         "heredofamiliares": "heredofamiliares",
@@ -184,7 +185,7 @@ def _merge_antecedentes_v2(
     merged = Antecedentes()
 
     for attr, field_name in field_map.items():
-        values = [getattr(item, attr) for item in items]
+        values = [getattr(item, attr) for item in valid]
         strategy = FIELD_STRATEGIES.get(field_name, MergeStrategy.CONCAT_DEDUPE)
         result = _merge_string_field(values, strategy)
         setattr(merged, attr, result)
@@ -201,12 +202,13 @@ def _merge_antecedentes_v2(
 
 
 def _merge_exploracion_v2(
-    items: List[ExploracionFisica],
+    items: List[Optional[ExploracionFisica]],
     conflicts: List[ConflictMarker]
-) -> ExploracionFisica:
+) -> Optional[ExploracionFisica]:
     """Merge ExploracionFisica with field-specific strategies."""
-    if not items:
-        return ExploracionFisica()
+    valid = [i for i in items if i is not None]
+    if not valid:
+        return None
 
     field_names = [
         "signos_vitales", "rinoscopia", "orofaringe", "cuello",
@@ -216,7 +218,7 @@ def _merge_exploracion_v2(
     merged = ExploracionFisica()
 
     for field_name in field_names:
-        values = [getattr(item, field_name) for item in items]
+        values = [getattr(item, field_name) for item in valid]
         strategy = FIELD_STRATEGIES.get(field_name, MergeStrategy.CONCAT_DEDUPE)
         result = _merge_string_field(values, strategy)
         setattr(merged, field_name, result)

@@ -43,7 +43,11 @@ def postprocess_orl_mapping(fields: StructuredFieldsV1) -> StructuredFieldsV1:
         StructuredFieldsV1: Mismo objeto (o copia) con campos modificados in-place si aplica.
     """
     ef = fields.exploracion_fisica
-    
+
+    # If exploracion_fisica is None (out-of-scope), nothing to remap
+    if ef is None:
+        return fields
+
     # 1. Obtener contenidos actuales (normalizar None -> "")
     cuello_content = ef.cuello or ""
     oro_content = ef.orofaringe or ""

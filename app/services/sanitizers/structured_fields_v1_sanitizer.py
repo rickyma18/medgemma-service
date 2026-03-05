@@ -174,8 +174,8 @@ def sanitize_structured_fields_v1(fields: StructuredFieldsV1) -> StructuredField
     return StructuredFieldsV1(
         motivoConsulta=sanitize_string_field(fields.motivo_consulta),
         padecimientoActual=sanitize_string_field(fields.padecimiento_actual),
-        antecedentes=_sanitize_antecedentes(fields.antecedentes),
-        exploracionFisica=_sanitize_exploracion_fisica(fields.exploracion_fisica),
+        antecedentes=_sanitize_antecedentes(fields.antecedentes) if fields.antecedentes else None,
+        exploracionFisica=_sanitize_exploracion_fisica(fields.exploracion_fisica) if fields.exploracion_fisica else None,
         diagnostico=_sanitize_diagnostico(fields.diagnostico),
         planTratamiento=sanitize_string_field(fields.plan_tratamiento),
         pronostico=sanitize_string_field(fields.pronostico),

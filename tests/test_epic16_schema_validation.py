@@ -105,10 +105,10 @@ def test_default_empty_schema_validity(empty_structured_fields):
     assert "exploracionFisica" in dump
     assert "motivoConsulta" in dump
     
-    # Verify nested objects are present even if empty (default_factory used in schema)
-    assert isinstance(dump["antecedentes"], dict)
-    assert isinstance(dump["exploracionFisica"], dict)
-    
+    # Nested objects default to None when not populated
+    assert dump["antecedentes"] is None
+    assert dump["exploracionFisica"] is None
+
     # Diagnostico is optional and defaults to None
     assert dump["diagnostico"] is None
 

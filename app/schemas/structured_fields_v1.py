@@ -114,14 +114,14 @@ class StructuredFieldsV1(BaseModel):
     )
 
     # === Antecedentes ===
-    antecedentes: Antecedentes = Field(
-        default_factory=Antecedentes,
+    antecedentes: Optional[Antecedentes] = Field(
+        default=None,
         description="Antecedentes del paciente"
     )
 
     # === Exploracion fisica ===
-    exploracion_fisica: ExploracionFisica = Field(
-        default_factory=ExploracionFisica,
+    exploracion_fisica: Optional[ExploracionFisica] = Field(
+        default=None,
         alias="exploracionFisica",
         description="Exploracion fisica ORL"
     )

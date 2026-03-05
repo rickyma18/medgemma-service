@@ -10,6 +10,7 @@ import pytest
 from app.services.structured_v1_extractor import (
     _build_v1_system_prompt,
     SHORT_TRANSCRIPT_THRESHOLD,
+    SHORT_TRANSCRIPT_THRESHOLD_INTERVIEW,
 )
 
 
@@ -147,11 +148,13 @@ class TestFewShotShortTranscript:
         assert "EJEMPLOS PARA TRANSCRIPTS CORTOS – INTERVIEW" not in prompt
 
     def test_long_transcript_no_fewshot(self):
-        prompt = _build_v1_system_prompt(scope="interview", transcript_len=200)
+        """Transcript above interview threshold should NOT get few-shot."""
+        prompt = _build_v1_system_prompt(scope="interview", transcript_len=500)
         assert "EJEMPLOS PARA TRANSCRIPTS CORTOS" not in prompt
 
     def test_exact_threshold_no_fewshot(self):
-        prompt = _build_v1_system_prompt(scope="interview", transcript_len=SHORT_TRANSCRIPT_THRESHOLD)
+        """Exact interview threshold boundary should NOT get few-shot."""
+        prompt = _build_v1_system_prompt(scope="interview", transcript_len=SHORT_TRANSCRIPT_THRESHOLD_INTERVIEW)
         assert "EJEMPLOS PARA TRANSCRIPTS CORTOS" not in prompt
 
     def test_zero_len_no_fewshot(self):
@@ -223,3 +226,151 @@ class TestPromptWithScope:
         prompt = _build_v1_system_prompt(scope="exam", transcript_len=500)
         assert "SCOPE:" in prompt
         assert "EJEMPLOS PARA TRANSCRIPTS CORTOS" not in prompt
+
+
+# ---------------------------------------------------------------------------
+# Interview scope: cirugía routing, negation format, anti-dangling motivo
+# ---------------------------------------------------------------------------
+
+class TestInterviewScopeCirugiaRouting:
+    """Interview scope must explicitly route cirugías to personalesPatologicos."""
+
+    def test_interview_scope_mentions_cirugia(self):
+        prompt = _build_v1_system_prompt(scope="interview")
+        lower = prompt.lower()
+        assert "cirugía" in lower or "cirugia" in lower
+
+    def test_interview_scope_routes_cirugia_to_patologicos(self):
+        prompt = _build_v1_system_prompt(scope="interview")
+        # The SCOPE block must mention both cirugía and personalesPatologicos
+        assert "personalesPatologicos" in prompt
+        lower = prompt.lower()
+        assert "apendicectom" in lower or "operaron" in lower
+
+
+class TestInterviewScopeNegationFormat:
+    """Interview scope must enforce Niega for diseases, No for habits."""
+
+    def test_interview_scope_niega_for_diseases(self):
+        prompt = _build_v1_system_prompt(scope="interview")
+        assert "Niega diabetes" in prompt or "Niega hipertensión" in prompt
+
+    def test_interview_scope_no_for_habits(self):
+        prompt = _build_v1_system_prompt(scope="interview")
+        assert "No fuma" in prompt or "No toma" in prompt
+
+    def test_interview_scope_separate_sentences(self):
+        prompt = _build_v1_system_prompt(scope="interview")
+        assert "ORACIÓN SEPARADA" in prompt
+
+
+class TestMotivoConsultaAntiDangling:
+    """motivoConsulta must not allow mid-sentence truncation."""
+
+    def test_base_prompt_no_word_count_limit(self):
+        prompt = _build_v1_system_prompt()
+        assert "3-15 palabras" not in prompt
+
+    def test_base_prompt_complete_sentences(self):
+        prompt = _build_v1_system_prompt()
+        lower = prompt.lower()
+        assert "nunca cortar a mitad de frase" in lower or "nunca cortar" in lower
+
+    def test_interview_scope_anti_dangling_rule(self):
+        prompt = _build_v1_system_prompt(scope="interview")
+        # Must warn against dangling prepositions
+        assert "de/del/con/y" in prompt
+
+
+class TestInterviewFewShotThreshold:
+    """Interview scope uses higher few-shot threshold than other scopes."""
+
+    def test_interview_threshold_is_higher(self):
+        assert SHORT_TRANSCRIPT_THRESHOLD_INTERVIEW > SHORT_TRANSCRIPT_THRESHOLD
+
+    def test_interview_200_chars_gets_fewshot(self):
+        """200 chars is above base threshold (150) but below interview (400)."""
+        prompt = _build_v1_system_prompt(scope="interview", transcript_len=200)
+        assert "EJEMPLOS PARA TRANSCRIPTS CORTOS" in prompt
+
+    def test_exam_200_chars_no_fewshot(self):
+        """200 chars is above base threshold (150) — no few-shot for exam scope."""
+        prompt = _build_v1_system_prompt(scope="exam", transcript_len=200)
+        assert "EJEMPLOS PARA TRANSCRIPTS CORTOS" not in prompt
+
+    def test_fewshot_contains_cirugia_example(self):
+        """Interview few-shot must include circuncisión/apendicectomía example."""
+        from app.services.structured_v1_extractor import _build_short_transcript_fewshot
+        fewshot = _build_short_transcript_fewshot("interview")
+        assert "Apendicectomía" in fewshot or "operaron" in fewshot.lower()
+
+
+# ---------------------------------------------------------------------------
+# Interview scope: symptom exclusion from antecedentes + negations[] quality
+# ---------------------------------------------------------------------------
+
+class TestInterviewScopeSymptomExclusion:
+    """Interview prompt must forbid placing symptoms in antecedentes fields."""
+
+    def test_symptoms_must_not_go_into_antecedentes(self):
+        prompt = _build_v1_system_prompt(scope="interview")
+        lower = prompt.lower()
+        assert "síntomas" in lower or "sintomas" in lower
+        assert "antecedentes" in lower
+        # Must explicitly forbid symptoms in antecedentes
+        assert "prohibido colocar síntomas en antecedentes" in lower or \
+               "no van en ningún campo de antecedentes" in lower
+
+    def test_symptom_examples_listed(self):
+        """Prompt must list common symptoms that should NOT go into antecedentes."""
+        prompt = _build_v1_system_prompt(scope="interview")
+        lower = prompt.lower()
+        for symptom in ["fiebre", "tos", "disnea", "dolor", "rinorrea", "nausea", "diarrea"]:
+            assert symptom in lower, f"Missing symptom exclusion example: {symptom}"
+
+    def test_symptom_negations_go_to_padecimiento_or_negations(self):
+        """Prompt must route symptom negations to padecimientoActual or negations[], not antecedentes."""
+        prompt = _build_v1_system_prompt(scope="interview")
+        lower = prompt.lower()
+        assert "padecimientoactual" in lower
+        assert "negations" in lower
+
+
+class TestInterviewScopeNegationsQuality:
+    """Interview prompt must enforce clean, atomic negation items."""
+
+    def test_no_dangling_conjunctions_rule(self):
+        """Prompt must explicitly forbid dangling conjunctions like 'ni', 'y', 'e', 'o'."""
+        prompt = _build_v1_system_prompt(scope="interview")
+        lower = prompt.lower()
+        assert "conjunciones colgantes" in lower or "nunca terminar un item con" in lower
+        # Must mention the specific conjunctions
+        assert "'ni'" in lower
+
+    def test_fuma_ni_example(self):
+        """Prompt must show the 'fuma ni' anti-pattern explicitly."""
+        prompt = _build_v1_system_prompt(scope="interview")
+        # Must show that "fuma ni" is wrong
+        assert "fuma ni" in prompt.lower()
+
+    def test_correct_splitting_example(self):
+        """Prompt must show the correct split: ["fuma", "toma alcohol"]."""
+        prompt = _build_v1_system_prompt(scope="interview")
+        assert '"fuma"' in prompt
+        assert '"toma alcohol"' in prompt
+
+    def test_no_duplication_with_antecedentes(self):
+        """Prompt must state negations[] should not duplicate antecedentes content."""
+        prompt = _build_v1_system_prompt(scope="interview")
+        lower = prompt.lower()
+        assert "duplica" in lower or "ya" in lower
+
+    def test_antecedentes_field_definitions(self):
+        """Prompt must define what each antecedentes subfield contains."""
+        prompt = _build_v1_system_prompt(scope="interview")
+        lower = prompt.lower()
+        # personalesNoPatologicos = habits
+        assert "hábitos" in lower or "habitos" in lower
+        # personalesPatologicos = chronic diseases + allergies + surgeries
+        assert "alergias" in lower or "alergia" in lower
+        assert "cirugías" in lower or "cirugias" in lower
