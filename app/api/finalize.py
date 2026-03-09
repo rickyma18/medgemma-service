@@ -28,7 +28,10 @@ from app.services.structured_v1_extractor import (
     _normalize_negations,
     _postprocess_interview_fields,
     _merge_negations_into_antecedentes,
+    _sanitize_vague_no_patologicos,
     rescue_surgeries_from_transcript,
+    rescue_family_history_from_transcript,
+    rescue_negated_history_from_transcript,
 )
 
 # Reusing contract logic (No new logic invented)
@@ -488,8 +491,14 @@ async def finalize_extraction(
             data_dict["negations"] = clean_negations
             data_dict = _postprocess_interview_fields(data_dict, finalize_scope)
             data_dict = _merge_negations_into_antecedentes(data_dict, finalize_scope)
+            # Sanitize vague/objectless no_patologicos phrases
+            data_dict = _sanitize_vague_no_patologicos(data_dict, finalize_scope)
             # Rescue surgeries from transcript that the LLM may have missed
             data_dict = rescue_surgeries_from_transcript(data_dict, transcript_text, finalize_scope)
+            # Rescue family history from transcript
+            data_dict = rescue_family_history_from_transcript(data_dict, transcript_text, finalize_scope)
+            # Rescue negated pathological history from transcript
+            data_dict = rescue_negated_history_from_transcript(data_dict, transcript_text, finalize_scope)
             # Restore cleaned negations (merge clears them for interview scope)
             data_dict["negations"] = clean_negations
             final_fields = StructuredFieldsV1.model_validate(data_dict)

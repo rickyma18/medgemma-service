@@ -307,8 +307,13 @@ FORMATO:
             "\n"
             "SIGNIFICADO DE CAMPOS DE ANTECEDENTES:\n"
             "- personalesNoPatologicos: SOLO hábitos (tabaco, alcohol, drogas, mascotas, vivienda, ocupación).\n"
-            "- personalesPatologicos: SOLO antecedentes médicos crónicos/enfermedades previas + alergias + cirugías.\n"
-            "- heredofamiliares: enfermedades de familiares directos.\n"
+            "  IMPORTANTE: Cada frase DEBE nombrar el objeto explícitamente. PROHIBIDO frases vagas sin objeto como 'No estoy tomando.', 'No tomo.', 'No consumo.' — siempre incluir QUÉ: 'No toma alcohol.', 'No fuma.', 'No consume drogas.'\n"
+            "  Si el paciente dice 'no estoy tomando medicamentos' o 'niega uso de medicamentos', eso NO va aquí; va en personalesPatologicos como 'Niega medicamentos.'\n"
+            "- personalesPatologicos: SOLO antecedentes médicos crónicos/enfermedades previas + alergias + cirugías + medicamentos.\n"
+            "  INCLUIR negaciones de enfermedades/cirugías/transfusiones: 'niega diabetes' → 'Niega diabetes.' 'niega cirugías' → 'Niega cirugías previas.' 'niega transfusiones' → 'Niega transfusiones.'\n"
+            "- heredofamiliares: enfermedades de familiares directos (padre, madre, hermanos, abuelos, tíos).\n"
+            "  IMPORTANTE: Si el transcript menciona 'padre/madre/hermano/abuelo con [enfermedad]' o 'antecedentes familiares de [enfermedad]', SIEMPRE capturar aquí. Buscar: HTA/hipertensión, DM/diabetes, cáncer, cardiopatía, asma, etc.\n"
+            "  Ejemplo: 'mi papá es diabético y mi mamá tiene hipertensión' → 'Padre con diabetes mellitus. Madre con hipertensión arterial.'\n"
             "- PROHIBIDO colocar síntomas en antecedentes. Los síntomas (fiebre, tos, disnea, dolor, rinorrea, nausea, diarrea, cefalea, odinofagia, etc.) NO van en ningún campo de antecedentes. Si son clínicamente relevantes van en padecimientoActual; si fueron negados, pueden ir a negations[] pero NUNCA a antecedentes.\n"
             "\n"
             "REGLAS:\n"
@@ -832,6 +837,284 @@ def rescue_surgeries_from_transcript(data: dict, transcript_text: str, scope: st
     new_text = " ".join(rescued)
     if app_field:
         # Ensure existing text ends with period before appending
+        if not app_field.endswith("."):
+            app_field += "."
+        app_field = f"{app_field} {new_text}"
+    else:
+        app_field = new_text
+
+    antecedentes["personalesPatologicos"] = app_field
+    data["antecedentes"] = antecedentes
+
+    return data
+
+
+# ── Deterministic family-history rescue from transcript ──
+
+# Patterns: family-relation word followed by disease keyword.
+_FAMILY_RELATION_RE = re.compile(
+    r'\b(padre|papá|papa|madre|mamá|mama|hermanos?|hermanas?'
+    r'|abuelos?|abuelas?|t[ií]os?|t[ií]as?'
+    r'|familiares?|antecedentes?\s+familiares?)\b',
+    re.IGNORECASE,
+)
+
+_FAMILY_DISEASE_MAP: list[tuple[re.Pattern, str]] = [
+    (re.compile(r'\b(?:hta|hipertensi[oó]n|hipertens[oa])\b', re.IGNORECASE), "hipertensión arterial"),
+    (re.compile(r'\b(?:dm2?|diabet(?:es|ico|ica)|diabético|diabética)\b', re.IGNORECASE), "diabetes mellitus"),
+    (re.compile(r'\b(?:c[aá]ncer|tumor|neoplasia|carcinoma)\b', re.IGNORECASE), "cáncer"),
+    (re.compile(r'\b(?:cardiopat[ií]a|infarto|card[ií]ac[oa])\b', re.IGNORECASE), "cardiopatía"),
+    (re.compile(r'\basma\b', re.IGNORECASE), "asma"),
+    (re.compile(r'\b(?:artritis|reumat)\b', re.IGNORECASE), "artritis"),
+    (re.compile(r'\b(?:epoc|enfisema)\b', re.IGNORECASE), "EPOC"),
+    (re.compile(r'\b(?:tiroides|hipotiroid|hipertiroid)\b', re.IGNORECASE), "enfermedad tiroidea"),
+    (re.compile(r'\b(?:renal|insuficiencia\s+renal|nefropat)\b', re.IGNORECASE), "enfermedad renal"),
+]
+
+# Regex to extract "relation con/es/tiene disease" or "relation disease" patterns
+# from a sentence-like context.  The 'rest' group stops at sentence boundaries
+# AND at the next family-relation word to avoid misattribution.
+_FAMILY_BOUNDARY = (
+    r'(?:(?:mi\s+)?(?:padre|papá|papa|madre|mamá|mama|hermanos?|hermanas?'
+    r'|abuelos?|abuelas?|t[ií]os?|t[ií]as?))'
+)
+_FAMILY_SENTENCE_RE = re.compile(
+    r'(?P<relation>(?:mi\s+)?(?:padre|papá|papa|madre|mamá|mama|hermanos?|hermanas?'
+    r'|abuelos?|abuelas?|t[ií]os?|t[ií]as?))'
+    r'\s+(?:(?:es|tiene|con|padece|padece\s+de|tiene\s+antecedente\s+de)\s+)?'
+    r'(?P<rest>(?:(?!' + _FAMILY_BOUNDARY + r')[^.;,]){3,40})',
+    re.IGNORECASE,
+)
+
+
+def rescue_family_history_from_transcript(data: dict, transcript_text: str, scope: str | None) -> dict:
+    """
+    Deterministic safety-net: scan *transcript_text* for family-history mentions
+    and ensure they appear in antecedentes.heredofamiliares.
+
+    Only runs for scope == "interview".
+    Skips if heredofamiliares already contains the relation+disease.
+
+    PHI-safe: only logs counts.
+    """
+    if scope != "interview" or not transcript_text:
+        return data
+
+    antecedentes = data.get("antecedentes") or {}
+    if not isinstance(antecedentes, dict):
+        antecedentes = {}
+
+    hf_field = (antecedentes.get("heredofamiliares") or "").strip()
+    hf_lower = hf_field.lower()
+
+    rescued: list[str] = []
+    text_lower = transcript_text.lower()
+
+    # Only proceed if we detect at least one family relation word
+    if not _FAMILY_RELATION_RE.search(text_lower):
+        return data
+
+    # Strategy: find "relation + disease" co-occurrences in nearby text
+    for match in _FAMILY_SENTENCE_RE.finditer(transcript_text):
+        relation_raw = match.group("relation").strip()
+        rest = match.group("rest").strip()
+
+        # Normalize relation
+        relation_lower = relation_raw.lower().strip()
+        if relation_lower.startswith("mi "):
+            relation_lower = relation_lower[3:]
+        relation_map = {
+            "padre": "Padre", "papá": "Padre", "papa": "Padre",
+            "madre": "Madre", "mamá": "Madre", "mama": "Madre",
+            "hermano": "Hermano", "hermana": "Hermana",
+            "hermanos": "Hermanos", "hermanas": "Hermanas",
+            "abuelo": "Abuelo", "abuela": "Abuela",
+            "abuelos": "Abuelos", "abuelas": "Abuelas",
+            "tío": "Tío", "tio": "Tío", "tía": "Tía", "tia": "Tía",
+            "tíos": "Tíos", "tios": "Tíos", "tías": "Tías", "tias": "Tías",
+        }
+        relation_canon = relation_map.get(relation_lower, relation_raw.capitalize())
+
+        # Check which diseases appear in the rest of the matched text
+        for disease_re, disease_canon in _FAMILY_DISEASE_MAP:
+            if disease_re.search(rest):
+                phrase = f"{relation_canon} con {disease_canon}."
+                # Dedup: skip if relation+disease already present
+                if relation_canon.lower() in hf_lower and disease_canon.lower() in hf_lower:
+                    continue
+                # Also skip if this exact phrase already in rescued
+                if phrase not in rescued:
+                    rescued.append(phrase)
+
+    if not rescued:
+        return data
+
+    logger.info("interview_family_history_rescue", rescued_count=len(rescued))
+
+    new_text = " ".join(rescued)
+    if hf_field:
+        if not hf_field.endswith("."):
+            hf_field += "."
+        hf_field = f"{hf_field} {new_text}"
+    else:
+        hf_field = new_text
+
+    antecedentes["heredofamiliares"] = hf_field
+    data["antecedentes"] = antecedentes
+
+    return data
+
+
+# ── Sanitize vague/objectless no_patologicos phrases ──
+
+# Patterns that are vague (no explicit object after the verb)
+_VAGUE_PHRASES_RE = re.compile(
+    r'^\s*No\s+(?:estoy\s+)?(?:tomando|tomo|consumo|consumiendo|uso|usando)\s*\.?\s*$',
+    re.IGNORECASE,
+)
+
+# Medication-related phrases that belong in patologicos, not no_patologicos
+_MEDS_IN_NOPAT_RE = re.compile(
+    r'\b(?:medicamentos?|fármacos?|farmacos?|pastillas?|medicina)\b',
+    re.IGNORECASE,
+)
+
+
+def _sanitize_vague_no_patologicos(data: dict, scope: str | None) -> dict:
+    """
+    Clean personalesNoPatologicos for interview scope:
+
+    1. Remove objectless/vague phrases: "No estoy tomando.", "No tomo.", "No consumo."
+       (these have no explicit object and add no clinical value).
+
+    2. Redirect medication negations to personalesPatologicos:
+       "No toma medicamentos" → personalesPatologicos: "Niega medicamentos."
+
+    PHI-safe: only logs counts.
+    """
+    if scope != "interview":
+        return data
+
+    antecedentes = data.get("antecedentes") or {}
+    if not isinstance(antecedentes, dict):
+        return data
+
+    apnp = antecedentes.get("personalesNoPatologicos")
+    if not apnp or not isinstance(apnp, str):
+        return data
+
+    # Split into sentences
+    sentences = [s.strip() for s in re.split(r'(?<=\.)\s+', apnp) if s.strip()]
+    if not sentences:
+        return data
+
+    kept: list[str] = []
+    to_patologicos: list[str] = []
+    removed_count = 0
+
+    for sent in sentences:
+        # Check if this is a vague/objectless phrase
+        if _VAGUE_PHRASES_RE.match(sent):
+            removed_count += 1
+            continue
+
+        # Check if this mentions medications (redirect to patologicos)
+        if _MEDS_IN_NOPAT_RE.search(sent):
+            # Reformat as patologicos entry
+            canonical = "Niega medicamentos."
+            to_patologicos.append(canonical)
+            removed_count += 1
+            continue
+
+        kept.append(sent)
+
+    if removed_count == 0:
+        return data
+
+    logger.info(
+        "interview_vague_no_patologicos_sanitized",
+        removed=removed_count,
+        redirected_to_pat=len(to_patologicos),
+    )
+
+    # Update personalesNoPatologicos
+    if kept:
+        new_apnp = " ".join(kept)
+        if not new_apnp.endswith("."):
+            new_apnp += "."
+        antecedentes["personalesNoPatologicos"] = new_apnp
+    else:
+        antecedentes["personalesNoPatologicos"] = None
+
+    # Merge redirected phrases into personalesPatologicos
+    if to_patologicos:
+        app_field = (antecedentes.get("personalesPatologicos") or "").strip()
+        for phrase in to_patologicos:
+            if phrase.lower().rstrip(".") not in app_field.lower():
+                if app_field and not app_field.endswith("."):
+                    app_field += "."
+                app_field = f"{app_field} {phrase}".strip() if app_field else phrase
+        antecedentes["personalesPatologicos"] = app_field or None
+
+    data["antecedentes"] = antecedentes
+    return data
+
+
+# ── Deterministic negated-history rescue from transcript ──
+
+_NEGATED_HISTORY_PATTERNS: list[tuple[re.Pattern, str]] = [
+    (re.compile(r'\bniega\s+(?:tener\s+)?(?:diabetes|dm)\b', re.IGNORECASE), "Niega diabetes."),
+    (re.compile(r'\bniega\s+(?:tener\s+)?(?:hipertensi[oó]n|hta)\b', re.IGNORECASE), "Niega hipertensión."),
+    (re.compile(r'\bniega\s+(?:tener\s+)?(?:cirug[ií]as?(?:\s+previas?)?)\b', re.IGNORECASE), "Niega cirugías previas."),
+    (re.compile(r'\bniega\s+(?:tener\s+)?transfusi[oó]n(?:es)?\b', re.IGNORECASE), "Niega transfusiones."),
+    (re.compile(r'\bniega\s+(?:tener\s+)?(?:alergias?(?:\s+a\s+\w+)?)\b', re.IGNORECASE), "Niega alergias."),
+    (re.compile(r'\bniega\s+(?:tener\s+)?(?:asma)\b', re.IGNORECASE), "Niega asma."),
+    (re.compile(r'\bniega\s+(?:tener\s+)?(?:hospitalizaci[oó]n(?:es)?|internamientos?)\b', re.IGNORECASE), "Niega hospitalizaciones."),
+    (re.compile(r'\bniega\s+(?:tener\s+)?(?:enfermedades?\s+cr[oó]nicas?)\b', re.IGNORECASE), "Niega enfermedades crónicas."),
+    (re.compile(r'\b(?:no\s+(?:tengo|tiene|tiene\s+antecedente)|sin)\s+(?:de\s+)?(?:diabetes|dm)\b', re.IGNORECASE), "Niega diabetes."),
+    (re.compile(r'\b(?:no\s+(?:tengo|tiene)|sin)\s+(?:de\s+)?(?:hipertensi[oó]n|hta)\b', re.IGNORECASE), "Niega hipertensión."),
+]
+
+
+def rescue_negated_history_from_transcript(data: dict, transcript_text: str, scope: str | None) -> dict:
+    """
+    Deterministic safety-net: scan *transcript_text* for negated pathological
+    history items ("niega diabetes", "niega cirugías", "niega transfusiones")
+    and ensure they appear in antecedentes.personalesPatologicos.
+
+    Only runs for scope == "interview".
+    Skips items already present in the field.
+
+    PHI-safe: only logs counts.
+    """
+    if scope != "interview" or not transcript_text:
+        return data
+
+    antecedentes = data.get("antecedentes") or {}
+    if not isinstance(antecedentes, dict):
+        antecedentes = {}
+
+    app_field = (antecedentes.get("personalesPatologicos") or "").strip()
+    app_lower = app_field.lower()
+
+    rescued: list[str] = []
+
+    for pattern, canonical_phrase in _NEGATED_HISTORY_PATTERNS:
+        if pattern.search(transcript_text):
+            # Check if already captured (fuzzy: check the disease keyword)
+            check_word = canonical_phrase.lower().replace("niega ", "").rstrip(".")
+            if check_word in app_lower:
+                continue
+            if canonical_phrase not in rescued:
+                rescued.append(canonical_phrase)
+
+    if not rescued:
+        return data
+
+    logger.info("interview_negated_history_rescue", rescued_count=len(rescued))
+
+    new_text = " ".join(rescued)
+    if app_field:
         if not app_field.endswith("."):
             app_field += "."
         app_field = f"{app_field} {new_text}"
@@ -1399,6 +1682,9 @@ def _parse_v1_output(output: str, scope: str | None = None) -> StructuredFieldsV
         # Merge negations into antecedentes for interview scope (before scope mask)
         repaired = _merge_negations_into_antecedentes(repaired, scope)
 
+        # Sanitize vague/objectless no_patologicos phrases (interview scope)
+        repaired = _sanitize_vague_no_patologicos(repaired, scope)
+
         # Apply scope mask POST-repair to prevent LLM contamination
         if scope:
             repaired = _apply_scope_mask(repaired, scope)
@@ -1535,6 +1821,14 @@ async def extract_structured_v1(
 
     # 2. Post-procesamiento deterministico (Cuello <-> Orofaringe)
     fields = postprocess_orl_mapping(fields)
+
+    # 3. Transcript-based deterministic rescues (interview scope)
+    if scope == "interview":
+        transcript_text = " ".join(seg.text for seg in transcript.segments if seg.text)
+        data_dict = fields.model_dump(by_alias=True)
+        data_dict = rescue_family_history_from_transcript(data_dict, transcript_text, scope)
+        data_dict = rescue_negated_history_from_transcript(data_dict, transcript_text, scope)
+        fields = StructuredFieldsV1.model_validate(data_dict)
 
     # Propagate upstream negations from context when provided.
     if context and context.negations:
